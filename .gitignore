@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Build
+.next/
+out/
+dist/
+backend/dist/
+build/
+*.tsbuildinfo
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Baileys auth
+backend/auth_info/
+
+# OS / IDE
+.DS_Store
+*.log
+.idea/
+.vscode/
+
+# Misc
+coverage/

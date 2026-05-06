@@ -1,0 +1,112 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@font-face {
+  font-family: "NeueHaasGrotesk";
+  src: local("Neue Haas Grotesk Display Pro"), local("NeueHaasGroteskDisplayPro");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  --color-void: #050708;
+  --color-deep-teal: #061012;
+  --color-dark-forest: #0a1a1c;
+  --color-forest: #122a28;
+  --color-card-border: #1f3533;
+  --color-neon-green: #36f4a4;
+  --color-muted: #9ca3af;
+  --color-shade-50: #6b7280;
+  --color-shade-70: #3f4a48;
+  --shadow-card: rgba(0, 0, 0, 0.35) 0px 1px 0px inset,
+    rgba(0, 0, 0, 0.45) 0px 12px 40px -12px,
+    rgba(54, 244, 164, 0.04) 0px 0px 0px 1px;
+  --background: #050708;
+  --foreground: #f4f4f5;
+  --card: #061012;
+  --card-foreground: #f4f4f5;
+  --popover: #0a1a1c;
+  --popover-foreground: #f4f4f5;
+  --primary: #ffffff;
+  --primary-foreground: #050708;
+  --secondary: #0a1a1c;
+  --secondary-foreground: #f4f4f5;
+  --muted: #0a1a1c;
+  --muted-foreground: #9ca3af;
+  --accent: #122a28;
+  --accent-foreground: #f4f4f5;
+  --destructive: oklch(0.65 0.2 22);
+  --border: #1f3533;
+  --input: #0a1a1c;
+  --ring: #36f4a4;
+  --radius: 0.75rem;
+}
+
+.dark {
+  --background: #050708;
+  --foreground: #f4f4f5;
+  --card: #061012;
+  --card-foreground: #f4f4f5;
+  --popover: #0a1a1c;
+  --popover-foreground: #f4f4f5;
+  --primary: #ffffff;
+  --primary-foreground: #050708;
+  --secondary: #0a1a1c;
+  --secondary-foreground: #f4f4f5;
+  --muted: #0a1a1c;
+  --muted-foreground: #9ca3af;
+  --accent: #122a28;
+  --accent-foreground: #f4f4f5;
+  --destructive: oklch(0.65 0.2 22);
+  --border: #1f3533;
+  --input: #0a1a1c;
+  --ring: #36f4a4;
+}
+
+@layer base {
+  * {
+    font-feature-settings: "ss03";
+    border-color: var(--border);
+  }
+
+  html {
+    @apply bg-background text-foreground;
+    background-color: var(--background);
+    background-image: radial-gradient(
+        ellipse 100% 60% at 50% -30%,
+        rgba(54, 244, 164, 0.12),
+        transparent 55%
+      ),
+      radial-gradient(ellipse 70% 50% at 100% 0%, rgba(18, 42, 40, 0.5), transparent),
+      radial-gradient(ellipse 50% 40% at 0% 100%, rgba(6, 16, 18, 0.9), transparent);
+    color: var(--foreground);
+  }
+
+  body {
+    @apply min-h-dvh bg-transparent text-foreground antialiased;
+  }
+
+  :focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px var(--color-void), 0 0 0 4px var(--ring);
+  }
+
+  button {
+    border-radius: 9999px;
+  }
+
+  input,
+  textarea,
+  select {
+    border-radius: 10px;
+  }
+}
+
+@layer utilities {
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(54, 244, 164, 0.25) transparent;
+  }
+}

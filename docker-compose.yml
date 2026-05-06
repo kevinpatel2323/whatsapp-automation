@@ -1,0 +1,14 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: wa_automation
+    ports:
+      - "5432:5432"
+    volumes:
+      - wa_pgdata:/var/lib/postgresql/data
+
+volumes:
+  wa_pgdata:
