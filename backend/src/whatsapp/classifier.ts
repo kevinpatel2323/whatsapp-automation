@@ -3,12 +3,41 @@
  * Pure function — no I/O.
  */
 
+import {
+  extractBlocks,
+  extractExtraInfo,
+  extractMatchDate,
+  extractPriceHints,
+  extractQuantity,
+  extractSequence,
+  extractSeats,
+  rawSnippet,
+  stripForMatch,
+} from "./classifier-extract.js";
+
 export type ClassifiedIntent = "buy" | "sell" | "none";
 
 export type ClassifyResult = {
   intent: ClassifiedIntent;
   /** Canonical label from the configured `matches` list, e.g. "MI vs CSK" */
   matchedMatch: string | null;
+};
+
+/** Full rule-based classification + structured extraction for dashboard / classified_messages */
+export type ClassifyRichResult = {
+  intent: ClassifiedIntent;
+  matchedMatch: string | null;
+  /** True when `matchedMatch` came from settings `matches`, not from free-text pairing detection */
+  isConfiguredMatch: boolean;
+  matchDate: string | null;
+  quantity: number | null;
+  blocks: string[];
+  seats: string[];
+  sequenceRequired: boolean | null;
+  sequenceNote: string | null;
+  priceHints: string[];
+  extraInfo: string[];
+  rawSnippet: string;
 };
 
 const TEAM_ALIASES: Record<string, string> = {
@@ -24,6 +53,8 @@ const TEAM_ALIASES: Record<string, string> = {
   RR: String.raw`(?:rr|rajasthan(?:\s*royals)?)`,
 };
 
+const ALL_TEAMS = Object.keys(TEAM_ALIASES) as string[];
+
 const SEP = String.raw`[\s*.,\-_/\\|&*]+`;
 
 function lineTokens(text: string) {
@@ -35,12 +66,7 @@ function lineTokens(text: string) {
 }
 
 function stripNoise(s: string) {
-  return s
-    .toLowerCase()
-    .replace(/[`*_#]/g, " ")
-    .replace(/\p{Extended_Pictographic}/gu, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+  return stripForMatch(s);
 }
 
 function splitMatchLabel(label: string): [string, string] | null {
@@ -127,7 +153,148 @@ const SELL_PATTERNS: RegExp[] = [
   /\b(?:take any|@)\d+[/:-]/i, // "Take any *@4500"
 ];
 
+/** Buy/sell/none from keywords only — independent of which match is mentioned */
+function computeBuySellIntent(body: string, s: string): ClassifiedIntent {
+  const lines = lineTokens(body);
+  const first = lines[0] ?? s.slice(0, 80);
+
+  const buyScore = BUY_PATTERNS.filter((p) => p.test(s)).length;
+  const sellScore = SELL_PATTERNS.filter((p) => p.test(s)).length;
+
+  if (buyScore === 0 && sellScore === 0) {
+    return "none";
+  }
+  if (buyScore > 0 && sellScore > 0) {
+    if (
+      /\bwtb\b/i.test(first) ||
+      /want to buy/i.test(first) ||
+      (/need /i.test(first) && /(?:ticket|tkt)/i.test(first))
+    ) {
+      return "buy";
+    }
+    return "sell";
+  }
+  if (sellScore > 0) {
+    return "sell";
+  }
+  return "buy";
+}
+
+/** First label from `matchLabels` whose teams appear in `s` (normalized) */
+function matchConfigured(s: string, matchLabels: string[]): string | null {
+  for (const label of matchLabels) {
+    const pair = splitMatchLabel(label);
+    if (!pair) {
+      continue;
+    }
+    const { reBoth } = twoTeamRegexForLabel(pair);
+    if (reBoth.test(s)) {
+      return label;
+    }
+    if (hasTeamsNear(s, pair, 40)) {
+      return label;
+    }
+  }
+  return null;
+}
+
 /**
+ * Any two known IPL teams co-mentioned (explicit vs / punctuation, or within 40 chars).
+ * Label order follows first occurrence in text (left-to-right).
+ */
+export function detectAnyPairing(s: string): string | null {
+  const lower = stripNoise(s);
+  type Hit = { team: string; idx: number };
+  const hits: Hit[] = [];
+  for (const team of ALL_TEAMS) {
+    const pattern = TEAM_ALIASES[team] ?? String.raw`\b${team}\b`;
+    const re = new RegExp(pattern, "i");
+    re.lastIndex = 0;
+    const m = re.exec(lower);
+    if (m?.index != null) {
+      hits.push({ team, idx: m.index });
+    }
+  }
+  if (hits.length < 2) {
+    return null;
+  }
+  hits.sort((a, b) => a.idx - b.idx);
+  const byTeam = new Map<string, number>();
+  for (const h of hits) {
+    if (!byTeam.has(h.team)) {
+      byTeam.set(h.team, h.idx);
+    }
+  }
+  const ordered = [...byTeam.entries()].sort((a, b) => a[1] - b[1]);
+  if (ordered.length < 2) {
+    return null;
+  }
+  const t1 = ordered[0]![0];
+  const t2 = ordered[1]![0];
+  const pair: [string, string] = [t1, t2];
+  const { reBoth } = twoTeamRegexForLabel(pair);
+  if (reBoth.test(lower)) {
+    return `${t1} vs ${t2}`;
+  }
+  if (hasTeamsNear(lower, pair, 40)) {
+    return `${t1} vs ${t2}`;
+  }
+  return null;
+}
+
+/**
+ * Rich classification + extraction (rules only). Intent is independent of configured matches.
+ * `matchedMatch` prefers a configured label; otherwise any detected two-team pairing.
+ */
+export function classifyTextRich(
+  body: string | null | undefined,
+  matchLabels: string[],
+): ClassifyRichResult {
+  if (!body?.trim()) {
+    return {
+      intent: "none",
+      matchedMatch: null,
+      isConfiguredMatch: false,
+      matchDate: null,
+      quantity: null,
+      blocks: [],
+      seats: [],
+      sequenceRequired: null,
+      sequenceNote: null,
+      priceHints: [],
+      extraInfo: [],
+      rawSnippet: "",
+    };
+  }
+  const s = stripNoise(body);
+  const intent = computeBuySellIntent(body, s);
+  let matchedMatch = matchConfigured(s, matchLabels);
+  let isConfiguredMatch = matchedMatch != null;
+  if (!matchedMatch) {
+    matchedMatch = detectAnyPairing(s);
+    isConfiguredMatch = false;
+  }
+  const seq = extractSequence(body);
+  return {
+    intent,
+    matchedMatch,
+    isConfiguredMatch,
+    matchDate: extractMatchDate(body),
+    quantity: extractQuantity(body),
+    blocks: extractBlocks(body),
+    seats: extractSeats(body),
+    sequenceRequired: seq.required,
+    sequenceNote: seq.note,
+    priceHints: extractPriceHints(body),
+    extraInfo: extractExtraInfo(body),
+    rawSnippet: rawSnippet(body),
+  };
+}
+
+/**
+ * Auto-reply / Message row: only when a **configured** match is detected.
+ * If no configured match, intent is forced to `none` and matchedMatch is null (no auto-reply).
+ *
  * @param body — message text (or null for non-text)
  * @param matchLabels — canonical list from settings, e.g. ["MI vs CSK", "RCB vs GT"]
  */
@@ -139,51 +306,10 @@ export function classifyText(
     return { intent: "none", matchedMatch: null };
   }
   const s = stripNoise(body);
-  const lines = lineTokens(body);
-  const first = lines[0] ?? s.slice(0, 80);
-
-  const buyScore = BUY_PATTERNS.filter((p) => p.test(s)).length;
-  const sellScore = SELL_PATTERNS.filter((p) => p.test(s)).length;
-
-  let intent: ClassifiedIntent = "none";
-  if (buyScore === 0 && sellScore === 0) {
-    intent = "none";
-  } else if (buyScore > 0 && sellScore > 0) {
-    if (
-      /\bwtb\b/i.test(first) ||
-      /want to buy/i.test(first) ||
-      (/need /i.test(first) && /(?:ticket|tkt)/i.test(first))
-    ) {
-      intent = "buy";
-    } else {
-      intent = "sell";
-    }
-  } else if (sellScore > 0) {
-    intent = "sell";
-  } else {
-    intent = "buy";
+  const intentRaw = computeBuySellIntent(body, s);
+  const matched = matchConfigured(s, matchLabels);
+  if (matched == null) {
+    return { intent: "none", matchedMatch: null };
   }
-
-  let matchedMatch: string | null = null;
-  for (const label of matchLabels) {
-    const pair = splitMatchLabel(label);
-    if (!pair) {
-      continue;
-    }
-    const { reBoth } = twoTeamRegexForLabel(pair);
-    if (reBoth.test(s)) {
-      matchedMatch = label;
-      break;
-    }
-    if (hasTeamsNear(s, pair, 40)) {
-      matchedMatch = label;
-      break;
-    }
-  }
-
-  if (matchedMatch == null) {
-    intent = "none";
-  }
-
-  return { intent, matchedMatch };
+  return { intent: intentRaw, matchedMatch: matched };
 }

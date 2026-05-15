@@ -1,6 +1,7 @@
 "use client";
 
-import { Loader2, Settings2, X } from "lucide-react";
+import Link from "next/link";
+import { LayoutList, Loader2, Settings2, X } from "lucide-react";
 import { ConnectionBadge } from "@/components/ConnectionBadge";
 import type { ConnectionState } from "@/lib/types";
 
@@ -58,6 +59,15 @@ export function TopNav({
             ) : null}
             <ConnectionBadge state={conn} />
           </button>
+
+          <Link
+            href="/classified"
+            className="inline-flex h-11 w-11 items-center justify-center rounded-full text-white/90 transition hover:bg-white/10"
+            aria-label="Classified messages"
+            title="Classified messages"
+          >
+            <LayoutList className="h-5 w-5" />
+          </Link>
 
           <button
             type="button"

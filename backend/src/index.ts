@@ -13,6 +13,7 @@ import { seedAutoReplySettingsIfEmpty } from "./db/seed-auto-reply.js";
 import { createSocketGateway } from "./realtime/socket.gateway.js";
 import { createAutoReplyService } from "./whatsapp/auto-reply.service.js";
 import { createBaileysService } from "./whatsapp/baileys.service.js";
+import { createClassificationService } from "./whatsapp/classification.service.js";
 import { mountApi } from "./api/routes.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -56,7 +57,8 @@ async function main() {
     getUserJid: () => waRef.s?.getUserJid(),
     emit,
   });
-  waRef.s = createBaileysService({ dataSource, emit, autoReply });
+  const classification = createClassificationService({ autoReply });
+  waRef.s = createBaileysService({ dataSource, emit, autoReply, classification });
   const wa = waRef.s;
 
   mountApi(app, { wa, dataSource, autoReply, emit });

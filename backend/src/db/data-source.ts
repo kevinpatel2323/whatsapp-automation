@@ -1,11 +1,17 @@
 import { DataSource } from "typeorm";
 import { config } from "../config.js";
-import { AutoReplyLog, AutoReplySettings, Chat, Message } from "./entities/index.js";
+import {
+  AutoReplyLog,
+  AutoReplySettings,
+  Chat,
+  ClassifiedMessage,
+  Message,
+} from "./entities/index.js";
 
 const dataSource = new DataSource({
   type: "postgres",
   url: config.databaseUrl,
-  entities: [Chat, Message, AutoReplySettings, AutoReplyLog],
+  entities: [Chat, Message, ClassifiedMessage, AutoReplySettings, AutoReplyLog],
   logging: false,
   synchronize: config.typeormSync,
   migrations: [],

@@ -6,10 +6,10 @@ import { cn } from "@/lib/utils";
 import { getJson, postJson } from "@/lib/api";
 import { getSocket } from "@/lib/socket";
 import { useSocketEvent } from "@/lib/use-socket-event";
-import type { ChatRow, ConnectionState, MessageDto } from "@/lib/types";
+import type { ChatRow, ConnectionState, GroupMessageReplyRef, MessageDto } from "@/lib/types";
 import { ChatAvatar } from "@/components/ChatAvatar";
 import { Composer } from "@/components/Composer";
-import { ChevronLeft, Radio } from "lucide-react";
+import { ChevronLeft, Radio, X } from "lucide-react";
 
 type MessagesResp = { messages: MessageDto[] };
 
@@ -68,9 +68,19 @@ type Props = {
   chat: ChatRow | null;
   conn: ConnectionState;
   onBack?: () => void;
+  /** When set, the next send quotes this group/thread message in the DM (WhatsApp “private reply”). */
+  privateReplyQuote?: GroupMessageReplyRef | null;
+  onPrivateReplyQuoteConsumed?: () => void;
 };
 
-export function ConversationView({ jid, chat, conn, onBack }: Props) {
+export function ConversationView({
+  jid,
+  chat,
+  conn,
+  onBack,
+  privateReplyQuote,
+  onPrivateReplyQuoteConsumed,
+}: Props) {
   const [items, setItems] = useState<MessageDto[]>([]);
   const [loading, setLoading] = useState(true);
   const [fetchErr, setFetchErr] = useState<string | null>(null);
@@ -140,7 +150,18 @@ export function ConversationView({ jid, chat, conn, onBack }: Props) {
   }, [items.length, jid, loading]);
 
   const handleSend = async (text: string) => {
-    await postJson<{ ok: boolean }>("/api/messages/send", { jid, text });
+    const body: Record<string, unknown> = { jid, text };
+    if (privateReplyQuote) {
+      body.quotedGroupMessage = {
+        remoteJid: privateReplyQuote.remoteJid,
+        messageId: privateReplyQuote.messageId,
+        fromMe: privateReplyQuote.fromMe,
+      };
+    }
+    await postJson<{ ok: boolean }>("/api/messages/send", body);
+    if (privateReplyQuote) {
+      onPrivateReplyQuoteConsumed?.();
+    }
   };
 
   return (
@@ -256,6 +277,22 @@ export function ConversationView({ jid, chat, conn, onBack }: Props) {
           <div ref={endRef} className="h-px shrink-0" aria-hidden />
         </div>
       </ScrollArea>
+
+      {privateReplyQuote ? (
+        <div className="flex shrink-0 items-center gap-2 border-t border-card-border/60 bg-neon-green/10 px-3 py-2 text-xs text-neon-green/95 sm:px-4">
+          <span className="min-w-0 flex-1 leading-snug">
+            Private reply: the group message will be quoted on send (same as configured-match auto-replies).
+          </span>
+          <button
+            type="button"
+            onClick={() => onPrivateReplyQuoteConsumed?.()}
+            className="inline-flex shrink-0 items-center justify-center rounded-lg border border-neon-green/35 p-1.5 text-neon-green transition hover:bg-neon-green/15"
+            aria-label="Send without quoting group message"
+          >
+            <X className="h-4 w-4" aria-hidden />
+          </button>
+        </div>
+      ) : null}
 
       <Composer
         disabled={!isOpen}

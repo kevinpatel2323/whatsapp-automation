@@ -1,4 +1,42 @@
+export type ClassifiedMessageDto = {
+  messageId: string;
+  remoteJid: string;
+  fromMe: boolean;
+  intent: string;
+  matchedMatch: string | null;
+  isConfiguredMatch: boolean;
+  matchDate: string | null;
+  quantity: number | null;
+  blocks: string[];
+  seats: string[];
+  sequenceRequired: boolean | null;
+  sequenceNote: string | null;
+  priceHints: string[];
+  extraInfo: string[];
+  rawSnippet: string | null;
+  body: string | null;
+  messageTimestampMs: string;
+  senderPushName: string | null;
+  senderParticipant: string | null;
+  groupJid: string | null;
+  groupName: string | null;
+  createdAt: string;
+};
+
+export type ClassifiedFacetsDto = {
+  matches: string[];
+  blocks: { block: string; count: number }[];
+  senders: { participant: string | null; pushName: string | null; count: number }[];
+};
+
 export type InboxTab = "all" | "autoReply";
+
+/** Points at a stored WhatsApp message (e.g. in a group) to quote when sending a private DM. */
+export type GroupMessageReplyRef = {
+  remoteJid: string;
+  messageId: string;
+  fromMe: boolean;
+};
 
 export type ConnectionState =
   | "idle"
@@ -72,6 +110,7 @@ export type SocketEventMap = {
   qr: { qr: string };
   "connection:state": { state: string };
   "message:new": MessageDto;
+  "message:classified": ClassifiedMessageDto;
   "chat:updated": ChatRow;
   "auto-reply:sent": {
     counterpartyJid?: string;

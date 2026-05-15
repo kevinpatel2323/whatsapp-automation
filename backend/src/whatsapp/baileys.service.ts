@@ -1,6 +1,7 @@
 import { rm } from "node:fs/promises";
 import { type Boom } from "@hapi/boom";
 import makeWASocket, {
+  BufferJSON,
   Browsers,
   DisconnectReason,
   fetchLatestBaileysVersion,
@@ -14,8 +15,11 @@ import makeWASocket, {
 } from "baileys";
 import pino from "pino";
 import type { DataSource } from "typeorm";
-import type { MessagePayload } from "../realtime/socket.gateway.js";
-import type { RealtimeEmits } from "../realtime/socket.gateway.js";
+import type {
+  ClassifiedMessagePayload,
+  MessagePayload,
+  RealtimeEmits,
+} from "../realtime/socket.gateway.js";
 import { authDir } from "../config.js";
 import { Message } from "../db/entities/Message.js";
 import { Chat } from "../db/entities/Chat.js";
@@ -23,6 +27,7 @@ import { chatToPayload } from "../db/chat-serialize.js";
 import { mapWAMessageToEntity, wamessageToStorableJson } from "./message-mapper.js";
 import * as qrcode from "qrcode";
 import type { createAutoReplyService } from "./auto-reply.service.js";
+import type { createClassificationService } from "./classification.service.js";
 
 const baileysLogger = pino({ level: "silent" });
 const appLogger = pino({
@@ -90,6 +95,7 @@ function toPayload(m: Message): MessagePayload {
 type WASocketT = Awaited<ReturnType<typeof makeWASocket>>;
 
 type AutoReply = ReturnType<typeof createAutoReplyService>;
+type Classification = ReturnType<typeof createClassificationService>;
 
 /**
  * Create Baileys session + message persistence. Single session for this app.
@@ -98,8 +104,9 @@ export function createBaileysService(opts: {
   dataSource: DataSource;
   emit: RealtimeEmits;
   autoReply: AutoReply;
+  classification: Classification;
 }) {
-  const { dataSource, emit, autoReply } = opts;
+  const { dataSource, emit, autoReply, classification } = opts;
   const msgRepo = () => dataSource.getRepository(Message);
   const chatRepo = () => dataSource.getRepository(Chat);
 
@@ -129,6 +136,8 @@ export function createBaileysService(opts: {
       : (existing?.unreadCount ?? 0);
     const preview = previewFromMessage(me);
 
+    let classifiedPayload: ClassifiedMessagePayload | null = null;
+
     await dataSource.transaction(async (em) => {
       const M = em.getRepository(Message);
       const C = em.getRepository(Chat);
@@ -150,6 +159,8 @@ export function createBaileysService(opts: {
         },
         { conflictPaths: ["jid"] },
       );
+      const chatRow = await C.findOne({ where: { jid: chatJid } });
+      classifiedPayload = await classification.upsertInTransaction(em, me, chatRow);
     });
 
     const saved = await msgRepo().findOne({
@@ -157,6 +168,9 @@ export function createBaileysService(opts: {
     });
     if (saved) {
       emit.emitMessage(chatJid, toPayload(saved));
+    }
+    if (classifiedPayload) {
+      emit.emitMessageClassified(chatJid, classifiedPayload);
     }
     if (!opts.skipChatEmit) {
       const chatRow = await chatRepo().findOne({ where: { jid: chatJid } });
@@ -481,7 +495,14 @@ export function createBaileysService(opts: {
       }
     },
 
-    async sendText(jid: string, text: string) {
+    async sendText(
+      jid: string,
+      text: string,
+      opts?: {
+        /** Same shape as auto-reply private reply: quote a group (or chat) message in the outgoing DM. */
+        quoted?: { remoteJid: string; messageId: string; fromMe: boolean };
+      },
+    ) {
       const sock = socket;
       if (!sock) {
         return { ok: false as const, error: "Not connected" };
@@ -490,8 +511,27 @@ export function createBaileysService(opts: {
       if (!trimmed) {
         return { ok: false as const, error: "Empty message" };
       }
+      let quotedWam: WAMessage | undefined;
+      if (opts?.quoted) {
+        const { remoteJid, messageId, fromMe } = opts.quoted;
+        const row = await msgRepo().findOne({
+          where: { id: messageId, remoteJid, fromMe },
+        });
+        if (!row?.rawJson) {
+          return { ok: false as const, error: "Quoted message not found" };
+        }
+        try {
+          quotedWam = JSON.parse(JSON.stringify(row.rawJson), BufferJSON.reviver) as WAMessage;
+        } catch (e) {
+          return { ok: false as const, error: `Invalid quoted message: ${errMessage(e)}` };
+        }
+      }
       try {
-        await sock.sendMessage(jid, { text: trimmed });
+        await sock.sendMessage(
+          jid,
+          { text: trimmed },
+          quotedWam ? { quoted: quotedWam } : undefined,
+        );
         return { ok: true as const };
       } catch (e) {
         return { ok: false as const, error: errMessage(e) };

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { Loader2, MessageCircle } from "lucide-react";
 import { TopNav } from "@/components/TopNav";
@@ -11,7 +11,14 @@ import { ConversationView } from "@/components/ConversationView";
 import { getJson, postJson } from "@/lib/api";
 import { getSocket, resetSocket } from "@/lib/socket";
 import { useSocketEvent } from "@/lib/use-socket-event";
-import type { ChatRow, MessageDto, ConnectionState, InboxTab, SocketEventMap } from "@/lib/types";
+import type {
+  ChatRow,
+  MessageDto,
+  ConnectionState,
+  GroupMessageReplyRef,
+  InboxTab,
+  SocketEventMap,
+} from "@/lib/types";
 
 type SessionStatus = { status: string };
 
@@ -131,6 +138,7 @@ export function Dashboard() {
   const [inboxTab, setInboxTab] = useState<InboxTab>("all");
   const [autoReplyJidSet, setAutoReplyJidSet] = useState<Set<string>>(() => new Set());
   const [autoReplyUniqueToday, setAutoReplyUniqueToday] = useState<number | null>(null);
+  const [privateReplyQuote, setPrivateReplyQuote] = useState<GroupMessageReplyRef | null>(null);
 
   const isOpen = String(conn) === "open";
 
@@ -143,6 +151,38 @@ export function Dashboard() {
     mq.addEventListener("change", sync);
     return () => mq.removeEventListener("change", sync);
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const jid = params.get("jid")?.trim();
+    if (!jid) return;
+    const quoteRemoteJid = params.get("quoteRemoteJid")?.trim();
+    const quoteMessageId = params.get("quoteMessageId")?.trim();
+    const quoteFromMe = params.get("quoteFromMe") === "true";
+    if (quoteRemoteJid && quoteMessageId) {
+      setPrivateReplyQuote({
+        remoteJid: quoteRemoteJid,
+        messageId: quoteMessageId,
+        fromMe: quoteFromMe,
+      });
+    }
+    setSelectedJid(jid);
+    setChats((prev) => prev.map((c) => (c.jid === jid ? { ...c, unreadCount: 0 } : c)));
+    if (!window.matchMedia("(min-width: 640px)").matches) {
+      setMobileShowFeed(true);
+    }
+    window.history.replaceState({}, "", window.location.pathname);
+  }, []);
+
+  const prevSelectedJidRef = useRef<string | null>(null);
+  useEffect(() => {
+    const prev = prevSelectedJidRef.current;
+    if (prev !== null && prev !== selectedJid) {
+      setPrivateReplyQuote(null);
+    }
+    prevSelectedJidRef.current = selectedJid;
+  }, [selectedJid]);
 
   const selectedChat = useMemo(
     () => chats.find((c) => c.jid === selectedJid) ?? null,
@@ -364,6 +404,8 @@ export function Dashboard() {
                 chat={selectedChat}
                 conn={conn}
                 onBack={handleBackFromConversation}
+                privateReplyQuote={privateReplyQuote}
+                onPrivateReplyQuoteConsumed={() => setPrivateReplyQuote(null)}
               />
             ) : (
               <section

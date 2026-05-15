@@ -5,6 +5,7 @@ import { Message } from "../db/entities/Message.js";
 import { Chat } from "../db/entities/Chat.js";
 import { AutoReplyLog } from "../db/entities/AutoReplyLog.js";
 import { AutoReplySettings } from "../db/entities/AutoReplySettings.js";
+import { ClassifiedMessage } from "../db/entities/ClassifiedMessage.js";
 import type { createAutoReplyService } from "../whatsapp/auto-reply.service.js";
 import type { createBaileysService } from "../whatsapp/baileys.service.js";
 import type { RealtimeEmits } from "../realtime/socket.gateway.js";
@@ -223,6 +224,130 @@ export function createAppRouter(ctx: {
     res.json({ messages: messages.map(serializeMessage) });
   });
 
+  r.get("/classified-messages/facets", async (_q: Request, res: Response) => {
+    const repo = dataSource.getRepository(ClassifiedMessage);
+
+    const matchesRaw = await repo
+      .createQueryBuilder("c")
+      .select("DISTINCT c.matchedMatch", "m")
+      .where("c.matchedMatch IS NOT NULL")
+      .orderBy("m", "ASC")
+      .limit(80)
+      .getRawMany<{ m: string }>();
+    const matches = matchesRaw.map((r) => r.m).filter((m): m is string => Boolean(m?.trim()));
+
+    const recent = await repo.find({
+      order: { messageTimestampMs: "DESC" },
+      take: 800,
+    });
+    const blockCounts = new Map<string, number>();
+    for (const row of recent) {
+      for (const b of row.blocks ?? []) {
+        const k = String(b).trim();
+        if (!k) continue;
+        blockCounts.set(k, (blockCounts.get(k) ?? 0) + 1);
+      }
+    }
+    const blocks = [...blockCounts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 40)
+      .map(([block, count]) => ({ block, count }));
+
+    const senderCounts = new Map<string, { participant: string | null; pushName: string | null; count: number }>();
+    for (const row of recent) {
+      if (row.fromMe) continue;
+      const p = row.senderParticipant ?? null;
+      const n = row.senderPushName ?? null;
+      if (!p && !n) continue;
+      const key = `${p ?? ""}|${n ?? ""}`;
+      const prev = senderCounts.get(key);
+      if (prev) prev.count += 1;
+      else senderCounts.set(key, { participant: p, pushName: n, count: 1 });
+    }
+    const senders = [...senderCounts.values()]
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 50);
+
+    res.json({ matches, blocks, senders });
+  });
+
+  r.get("/classified-messages", async (req: Request, res: Response) => {
+    const limit = Math.min(
+      Math.max(1, Number.parseInt(String(req.query.limit ?? "80"), 10) || 80),
+      200,
+    );
+    const match = req.query.match ? String(req.query.match).trim() : undefined;
+    const intent = req.query.intent ? String(req.query.intent).trim().toLowerCase() : undefined;
+    const block = req.query.block ? String(req.query.block).trim() : undefined;
+    const senderJid = req.query.senderJid ? String(req.query.senderJid).trim() : undefined;
+    const groupJid = req.query.groupJid ? String(req.query.groupJid).trim() : undefined;
+    const fromMs = req.query.fromMs != null ? String(req.query.fromMs) : undefined;
+    const toMs = req.query.toMs != null ? String(req.query.toMs) : undefined;
+    const beforeMs = req.query.beforeMs != null ? String(req.query.beforeMs) : undefined;
+    const beforeId = req.query.beforeId != null ? String(req.query.beforeId) : undefined;
+    const onlyIncoming =
+      String(req.query.onlyIncoming ?? "true").toLowerCase() !== "false";
+    const configuredOnly =
+      String(req.query.configuredOnly ?? "").toLowerCase() === "true";
+
+    if (intent && intent !== "buy" && intent !== "sell" && intent !== "none") {
+      res.status(400).json({ error: "intent must be buy, sell, or none" });
+      return;
+    }
+
+    const qb = dataSource
+      .getRepository(ClassifiedMessage)
+      .createQueryBuilder("c")
+      .orderBy("c.messageTimestampMs", "DESC")
+      .addOrderBy("c.messageId", "ASC")
+      .take(limit);
+
+    if (onlyIncoming) {
+      qb.andWhere("c.fromMe = :fm", { fm: false });
+    }
+    if (configuredOnly) {
+      qb.andWhere("c.isConfiguredMatch = :icm", { icm: true });
+    }
+    if (match) {
+      qb.andWhere("c.matchedMatch = :match", { match });
+    }
+    if (intent) {
+      qb.andWhere("c.intent = :intent", { intent });
+    }
+    if (block) {
+      const safe = block.replace(/[%_\\]/g, "");
+      qb.andWhere(`CAST(c.blocks AS TEXT) ILIKE :blk`, { blk: `%${safe}%` });
+    }
+    if (senderJid) {
+      qb.andWhere("(c.senderParticipant = :sj OR c.senderParticipant LIKE :sjEnd)", {
+        sj: senderJid,
+        sjEnd: `%${senderJid.split("@")[0]}%`,
+      });
+    }
+    if (groupJid) {
+      qb.andWhere("c.remoteJid = :gj", { gj: groupJid });
+    }
+    if (fromMs) {
+      qb.andWhere("c.messageTimestampMs >= :fromMs", { fromMs });
+    }
+    if (toMs) {
+      qb.andWhere("c.messageTimestampMs <= :toMs", { toMs });
+    }
+    if (beforeMs) {
+      if (beforeId) {
+        qb.andWhere(
+          "(c.messageTimestampMs < :bms OR (c.messageTimestampMs = :bms2 AND c.messageId < :bid))",
+          { bms: beforeMs, bms2: beforeMs, bid: beforeId },
+        );
+      } else {
+        qb.andWhere("c.messageTimestampMs < :bms", { bms: beforeMs });
+      }
+    }
+
+    const rows = await qb.getMany();
+    res.json({ items: rows.map(serializeClassified) });
+  });
+
   r.post("/messages/send", async (req: Request, res: Response) => {
     const b = (req.body ?? {}) as Record<string, unknown>;
     const jid = typeof b.jid === "string" ? b.jid.trim() : "";
@@ -231,7 +356,18 @@ export function createAppRouter(ctx: {
       res.status(400).json({ error: "jid is required" });
       return;
     }
-    const out = await wa.sendText(jid, text);
+    let quoted: { remoteJid: string; messageId: string; fromMe: boolean } | undefined;
+    const q = b.quotedGroupMessage;
+    if (q != null && typeof q === "object" && !Array.isArray(q)) {
+      const o = q as Record<string, unknown>;
+      const remoteJid = typeof o.remoteJid === "string" ? o.remoteJid.trim() : "";
+      const messageId = typeof o.messageId === "string" ? o.messageId.trim() : "";
+      const fromMe = o.fromMe === true;
+      if (remoteJid && messageId) {
+        quoted = { remoteJid, messageId, fromMe };
+      }
+    }
+    const out = await wa.sendText(jid, text, quoted ? { quoted } : undefined);
     if (!out.ok) {
       res.status(400).json({ ok: false, error: out.error });
       return;
@@ -240,6 +376,33 @@ export function createAppRouter(ctx: {
   });
 
   return r;
+}
+
+function serializeClassified(c: ClassifiedMessage) {
+  return {
+    messageId: c.messageId,
+    remoteJid: c.remoteJid,
+    fromMe: c.fromMe,
+    intent: c.intent,
+    matchedMatch: c.matchedMatch ?? null,
+    isConfiguredMatch: Boolean(c.isConfiguredMatch),
+    matchDate: c.matchDate ?? null,
+    quantity: c.quantity ?? null,
+    blocks: c.blocks ?? [],
+    seats: c.seats ?? [],
+    sequenceRequired: c.sequenceRequired ?? null,
+    sequenceNote: c.sequenceNote ?? null,
+    priceHints: c.priceHints ?? [],
+    extraInfo: c.extraInfo ?? [],
+    rawSnippet: c.rawSnippet ?? null,
+    body: c.body ?? null,
+    messageTimestampMs: c.messageTimestampMs,
+    senderPushName: c.senderPushName ?? null,
+    senderParticipant: c.senderParticipant ?? null,
+    groupJid: c.groupJid ?? null,
+    groupName: c.groupName ?? null,
+    createdAt: c.createdAt.toISOString(),
+  };
 }
 
 function serializeMessage(m: Message) {

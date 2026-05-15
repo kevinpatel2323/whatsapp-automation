@@ -16,6 +16,32 @@ export type MessagePayload = {
   matchedMatch: string | null;
 };
 
+/** Classified row for REST + `message:classified` */
+export type ClassifiedMessagePayload = {
+  messageId: string;
+  remoteJid: string;
+  fromMe: boolean;
+  intent: string;
+  matchedMatch: string | null;
+  isConfiguredMatch: boolean;
+  matchDate: string | null;
+  quantity: number | null;
+  blocks: string[];
+  seats: string[];
+  sequenceRequired: boolean | null;
+  sequenceNote: string | null;
+  priceHints: string[];
+  extraInfo: string[];
+  rawSnippet: string | null;
+  body: string | null;
+  messageTimestampMs: string;
+  senderPushName: string | null;
+  senderParticipant: string | null;
+  groupJid: string | null;
+  groupName: string | null;
+  createdAt: string;
+};
+
 /** Serialized chat row for REST + `chat:updated` socket events */
 export type ChatRowPayload = {
   jid: string;
@@ -44,6 +70,11 @@ function createEmits(io: Server) {
     emitMessage(jid: string, payload: MessagePayload) {
       io.emit("message:new", payload);
       io.to(`chat:${jid}`).emit("message:new", payload);
+    },
+    /** Classified extraction for inbox board + thread subscribers */
+    emitMessageClassified(jid: string, payload: ClassifiedMessagePayload) {
+      io.emit("message:classified", payload);
+      io.to(`chat:${jid}`).emit("message:classified", payload);
     },
     emitChatUpdated(chat: ChatRowPayload) {
       io.emit("chat:updated", chat);
