@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 import type { ChatRow, InboxTab } from "@/lib/types";
+import { chatListTitle } from "@/lib/chat-list-display";
 import { ChatAvatar } from "@/components/ChatAvatar";
 import { Inbox, Search } from "lucide-react";
 
@@ -40,10 +41,6 @@ function fmtListTime(iso: string | null): string {
     return d.toLocaleDateString(undefined, { weekday: "short" });
   }
   return d.toLocaleDateString(undefined, { day: "2-digit", month: "2-digit", year: "numeric" });
-}
-
-function displayName(c: ChatRow): string {
-  return c.name?.trim() || c.jid;
 }
 
 function previewLine(c: ChatRow): string {
@@ -86,11 +83,14 @@ export function ChatList({
   const filtered = useMemo(() => {
     const t = q.trim().toLowerCase();
     if (!t) return chats;
-    return chats.filter(
-      (c) =>
+    return chats.filter((c) => {
+      const title = chatListTitle(c).toLowerCase();
+      return (
         c.jid.toLowerCase().includes(t) ||
-        (c.name?.toLowerCase().includes(t) ?? false),
-    );
+        (c.name?.toLowerCase().includes(t) ?? false) ||
+        title.includes(t)
+      );
+    });
   }, [chats, q]);
 
   const emptyMessage = (() => {
@@ -188,7 +188,7 @@ export function ChatList({
               <p className="px-3 py-8 text-center text-sm text-muted-text">{emptyMessage}</p>
             ) : (
               filtered.map((c) => {
-                const label = displayName(c);
+                const label = chatListTitle(c);
                 const prev = previewLine(c);
                 return (
                   <button
@@ -205,7 +205,7 @@ export function ChatList({
                     <ChatAvatar jid={c.jid} label={label} size="sm" className="sm:h-10 sm:w-10 sm:text-xs" />
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center justify-between gap-2">
-                        <span className="truncate text-sm font-medium text-white" title={c.jid}>
+                        <span className="truncate text-sm font-medium text-white" title={`${label}\n${c.jid}`}>
                           {label}
                         </span>
                         <div className="flex shrink-0 items-center gap-1.5">

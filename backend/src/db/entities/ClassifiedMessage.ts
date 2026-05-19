@@ -68,6 +68,10 @@ export class ClassifiedMessage {
   @Column("varchar", { length: 512, nullable: true })
   senderParticipant?: string | null;
 
+  /** When `senderParticipant` is an `@lid`, Baileys may expose the PN JID here. */
+  @Column("varchar", { length: 512, nullable: true })
+  senderParticipantAlt?: string | null;
+
   @Column("varchar", { length: 512, nullable: true })
   groupJid?: string | null;
 

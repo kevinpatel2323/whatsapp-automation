@@ -33,6 +33,7 @@ function toPayload(row: ClassifiedMessage): ClassifiedMessagePayload {
     messageTimestampMs: row.messageTimestampMs,
     senderPushName: row.senderPushName ?? null,
     senderParticipant: row.senderParticipant ?? null,
+    senderParticipantAlt: row.senderParticipantAlt ?? null,
     groupJid: row.groupJid ?? null,
     groupName: row.groupName ?? null,
     createdAt: row.createdAt.toISOString(),
@@ -79,6 +80,7 @@ export function createClassificationService(opts: {
       messageTimestampMs: me.messageTimestampMs,
       senderPushName: me.pushName?.trim() || null,
       senderParticipant: me.participant?.trim() || null,
+      senderParticipantAlt: me.participantAlt?.trim() || null,
       groupJid,
       groupName,
     };

@@ -7,6 +7,13 @@ import { getJson, postJson } from "@/lib/api";
 import { getSocket } from "@/lib/socket";
 import { useSocketEvent } from "@/lib/use-socket-event";
 import type { ChatRow, ConnectionState, GroupMessageReplyRef, MessageDto } from "@/lib/types";
+import {
+  displayLabelAlreadyShowsPhoneDigits,
+  formatWhatsAppPhoneJid,
+  messageBubbleSenderLabel,
+  phoneUserDigitsFromWhatsAppJid,
+  shortJidForUi,
+} from "@/lib/whatsapp-display";
 import { ChatAvatar } from "@/components/ChatAvatar";
 import { Composer } from "@/components/Composer";
 import { ChevronLeft, Radio, X } from "lucide-react";
@@ -25,11 +32,6 @@ function dedupAppendAsc(prev: MessageDto[], incoming: MessageDto): MessageDto[] 
     if (ta !== tb) return ta - tb;
     return a.id.localeCompare(b.id);
   });
-}
-
-function shortJid(j: string) {
-  if (j.length < 22) return j;
-  return `${j.slice(0, 10)}…${j.slice(-8)}`;
 }
 
 function fmtBody(m: MessageDto) {
@@ -68,6 +70,10 @@ type Props = {
   chat: ChatRow | null;
   conn: ConnectionState;
   onBack?: () => void;
+  /** When set, show the header back control at `sm` and up (default: mobile-only). */
+  alwaysShowBackButton?: boolean;
+  /** Accessible label for the back button (default: “Back to chats”). */
+  backAriaLabel?: string;
   /** When set, the next send quotes this group/thread message in the DM (WhatsApp “private reply”). */
   privateReplyQuote?: GroupMessageReplyRef | null;
   onPrivateReplyQuoteConsumed?: () => void;
@@ -78,6 +84,8 @@ export function ConversationView({
   chat,
   conn,
   onBack,
+  alwaysShowBackButton,
+  backAriaLabel,
   privateReplyQuote,
   onPrivateReplyQuoteConsumed,
 }: Props) {
@@ -87,13 +95,30 @@ export function ConversationView({
   const endRef = useRef<HTMLDivElement>(null);
   const isOpen = String(conn) === "open";
 
+  const isGroup = chat?.isGroup ?? jid.endsWith("@g.us");
+
   const title = useMemo(() => {
     const n = chat?.name?.trim();
     if (n) return n;
-    return shortJid(jid);
-  }, [chat, jid]);
+    const phone = formatWhatsAppPhoneJid(jid);
+    if (phone) return phone;
+    const sj = shortJidForUi(jid);
+    if (sj) return sj;
+    return isGroup ? "Group" : "WhatsApp";
+  }, [chat, jid, isGroup]);
 
-  const isGroup = chat?.isGroup ?? jid.endsWith("@g.us");
+  /** Formatted E.164-style number for direct `@s.whatsapp.net` threads (not for `@lid`). */
+  const headerPhone = useMemo(() => {
+    if (isGroup) return null;
+    const fromThread = formatWhatsAppPhoneJid(jid) ?? formatWhatsAppPhoneJid(chat?.jid ?? null);
+    if (!fromThread) return null;
+    if (title === fromThread) return null;
+    const digits = phoneUserDigitsFromWhatsAppJid(jid) ?? phoneUserDigitsFromWhatsAppJid(chat?.jid ?? null);
+    if (!digits) return null;
+    if (displayLabelAlreadyShowsPhoneDigits(chat?.name, digits)) return null;
+    if (displayLabelAlreadyShowsPhoneDigits(title, digits)) return null;
+    return fromThread;
+  }, [chat?.jid, chat?.name, isGroup, jid, title]);
 
   const markRead = useCallback(async () => {
     try {
@@ -175,8 +200,11 @@ export function ConversationView({
           <button
             type="button"
             onClick={onBack}
-            className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-card-border text-white transition hover:bg-white/10 sm:hidden"
-            aria-label="Back to chats"
+            className={cn(
+              "inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-card-border text-white transition hover:bg-white/10",
+              !alwaysShowBackButton && "sm:hidden",
+            )}
+            aria-label={backAriaLabel ?? "Back to chats"}
           >
             <ChevronLeft className="h-5 w-5" aria-hidden />
           </button>
@@ -184,6 +212,9 @@ export function ConversationView({
         <ChatAvatar jid={jid} label={title} className="hidden sm:flex" />
         <div className="min-w-0 flex-1">
           <h2 className="truncate font-display text-lg font-semibold tracking-tight text-white">{title}</h2>
+          {headerPhone ? (
+            <p className="truncate text-xs tabular-nums text-zinc-300/90">{headerPhone}</p>
+          ) : null}
           <p className="truncate text-xs text-muted-text">
             {isGroup ? "Group" : "Direct"} ·{" "}
             <span className="inline-flex items-center gap-1 text-neon-green/90">
@@ -217,9 +248,7 @@ export function ConversationView({
               const showSender =
                 isGroup && !m.fromMe && (!prev || prev.fromMe || prevSenderKey !== curSenderKey);
 
-              const senderLabel =
-                m.pushName?.trim() ||
-                (m.participant ? shortJid(m.participant) : "Member");
+              const senderLabel = messageBubbleSenderLabel(m);
 
               return (
                 <div key={msgKey(m)}>

@@ -37,6 +37,7 @@ export type ClassifiedMessagePayload = {
   messageTimestampMs: string;
   senderPushName: string | null;
   senderParticipant: string | null;
+  senderParticipantAlt: string | null;
   groupJid: string | null;
   groupName: string | null;
   createdAt: string;

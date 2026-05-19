@@ -18,6 +18,8 @@ export type ClassifiedMessageDto = {
   messageTimestampMs: string;
   senderPushName: string | null;
   senderParticipant: string | null;
+  /** PN JID when `senderParticipant` is an `@lid`. */
+  senderParticipantAlt: string | null;
   groupJid: string | null;
   groupName: string | null;
   createdAt: string;

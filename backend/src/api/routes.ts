@@ -14,6 +14,15 @@ import { chatToPayload } from "../db/chat-serialize.js";
 type Wa = ReturnType<typeof createBaileysService>;
 type Ar = ReturnType<typeof createAutoReplyService>;
 
+/** For ILIKE ... ESCAPE '\\' in PostgreSQL. */
+function escapePgLikePattern(s: string): string {
+  return s.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+}
+
+function digitsOnly(s: string): string {
+  return s.replace(/\D/g, "");
+}
+
 export function createAppRouter(ctx: {
   wa: Wa;
   dataSource: DataSource;
@@ -315,17 +324,57 @@ export function createAppRouter(ctx: {
       qb.andWhere("c.intent = :intent", { intent });
     }
     if (block) {
-      const safe = block.replace(/[%_\\]/g, "");
-      qb.andWhere(`CAST(c.blocks AS TEXT) ILIKE :blk`, { blk: `%${safe}%` });
+      const blkPat = `%${escapePgLikePattern(block)}%`;
+      qb.andWhere(
+        `(CAST(c.blocks AS TEXT) ILIKE :blkPat ESCAPE '\\' OR COALESCE(c.body, '') ILIKE :blkPat ESCAPE '\\' OR COALESCE(c.rawSnippet, '') ILIKE :blkPat ESCAPE '\\')`,
+        { blkPat },
+      );
     }
     if (senderJid) {
-      qb.andWhere("(c.senderParticipant = :sj OR c.senderParticipant LIKE :sjEnd)", {
-        sj: senderJid,
-        sjEnd: `%${senderJid.split("@")[0]}%`,
-      });
+      // Query param remains `senderJid` for API compatibility; value is free-text sender search
+      // (push name substring, formatted phone digits, or full / partial JID including alt PN JID).
+      const raw = senderJid;
+      const ors: string[] = [];
+      const senderParams: Record<string, string> = {};
+
+      ors.push("(c.senderParticipant = :senderPartEq OR c.senderParticipantAlt = :senderPartEq)");
+
+      if (raw.includes("@")) {
+        const local = raw.split("@")[0] ?? "";
+        if (local.length > 0) {
+          const like = `%${escapePgLikePattern(local)}%`;
+          ors.push(
+            "(c.senderParticipant ILIKE :senderPartLocal ESCAPE '\\' OR c.senderParticipantAlt ILIKE :senderPartLocal ESCAPE '\\')",
+          );
+          senderParams.senderPartLocal = like;
+        }
+      }
+
+      ors.push(`COALESCE(c.senderPushName, '') ILIKE :senderPushPat ESCAPE '\\'`);
+      senderParams.senderPushPat = `%${escapePgLikePattern(raw)}%`;
+
+      const d = digitsOnly(raw);
+      if (d.length > 0) {
+        const digExpr = `regexp_replace(split_part(COALESCE(%COL%, ''), '@', 1), '[^0-9]', '', 'g') LIKE :senderDigPat ESCAPE '\\'`;
+        ors.push(
+          `(${digExpr.replace("%COL%", "c.senderParticipant")} OR ${digExpr.replace("%COL%", "c.senderParticipantAlt")})`,
+        );
+        senderParams.senderDigPat = `%${d}%`;
+      }
+
+      qb.andWhere(`(${ors.join(" OR ")})`, { ...senderParams, senderPartEq: raw });
     }
     if (groupJid) {
-      qb.andWhere("c.remoteJid = :gj", { gj: groupJid });
+      if (groupJid.includes("@")) {
+        qb.andWhere("c.remoteJid = :gj", { gj: groupJid });
+      } else {
+        const safe = groupJid.replace(/[%_\\]/g, "");
+        if (safe) {
+          qb.andWhere("LOWER(COALESCE(c.groupName, '')) LIKE :gn", {
+            gn: `%${safe.toLowerCase()}%`,
+          });
+        }
+      }
     }
     if (fromMs) {
       qb.andWhere("c.messageTimestampMs >= :fromMs", { fromMs });
@@ -356,17 +405,7 @@ export function createAppRouter(ctx: {
       res.status(400).json({ error: "jid is required" });
       return;
     }
-    let quoted: { remoteJid: string; messageId: string; fromMe: boolean } | undefined;
-    const q = b.quotedGroupMessage;
-    if (q != null && typeof q === "object" && !Array.isArray(q)) {
-      const o = q as Record<string, unknown>;
-      const remoteJid = typeof o.remoteJid === "string" ? o.remoteJid.trim() : "";
-      const messageId = typeof o.messageId === "string" ? o.messageId.trim() : "";
-      const fromMe = o.fromMe === true;
-      if (remoteJid && messageId) {
-        quoted = { remoteJid, messageId, fromMe };
-      }
-    }
+    const quoted = parseQuotedGroupMessage(b);
     const out = await wa.sendText(jid, text, quoted ? { quoted } : undefined);
     if (!out.ok) {
       res.status(400).json({ ok: false, error: out.error });
@@ -375,7 +414,63 @@ export function createAppRouter(ctx: {
     res.json({ ok: true });
   });
 
+  r.post("/messages/send-bulk", async (req: Request, res: Response) => {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    const text = typeof b.text === "string" ? b.text : "";
+    if (!text.trim()) {
+      res.status(400).json({ error: "text is required" });
+      return;
+    }
+    const targetsRaw = b.targets;
+    if (!Array.isArray(targetsRaw)) {
+      res.status(400).json({ error: "targets must be an array" });
+      return;
+    }
+    if (targetsRaw.length > 25) {
+      res.status(400).json({ error: "max 25 targets" });
+      return;
+    }
+
+    const results: { jid: string; ok: boolean; error?: string }[] = [];
+    for (const t of targetsRaw) {
+      if (!t || typeof t !== "object" || Array.isArray(t)) {
+        results.push({ jid: "", ok: false, error: "invalid target" });
+        continue;
+      }
+      const o = t as Record<string, unknown>;
+      const jid = typeof o.jid === "string" ? o.jid.trim() : "";
+      if (!jid) {
+        results.push({ jid: "", ok: false, error: "missing jid" });
+        continue;
+      }
+      const quoted = parseQuotedGroupMessage(o);
+      const out = await wa.sendText(jid, text, quoted ? { quoted } : undefined);
+      if (out.ok) {
+        results.push({ jid, ok: true });
+      } else {
+        results.push({ jid, ok: false, error: out.error });
+      }
+    }
+
+    const sent = results.filter((r) => r.ok).length;
+    const failed = results.length - sent;
+    res.json({ results, sent, failed });
+  });
+
   return r;
+}
+
+function parseQuotedGroupMessage(b: Record<string, unknown>): { remoteJid: string; messageId: string; fromMe: boolean } | undefined {
+  const q = b.quotedGroupMessage;
+  if (q == null || typeof q !== "object" || Array.isArray(q)) return undefined;
+  const o = q as Record<string, unknown>;
+  const remoteJid = typeof o.remoteJid === "string" ? o.remoteJid.trim() : "";
+  const messageId = typeof o.messageId === "string" ? o.messageId.trim() : "";
+  const fromMe = o.fromMe === true;
+  if (remoteJid && messageId) {
+    return { remoteJid, messageId, fromMe };
+  }
+  return undefined;
 }
 
 function serializeClassified(c: ClassifiedMessage) {
@@ -399,6 +494,7 @@ function serializeClassified(c: ClassifiedMessage) {
     messageTimestampMs: c.messageTimestampMs,
     senderPushName: c.senderPushName ?? null,
     senderParticipant: c.senderParticipant ?? null,
+    senderParticipantAlt: c.senderParticipantAlt ?? null,
     groupJid: c.groupJid ?? null,
     groupName: c.groupName ?? null,
     createdAt: c.createdAt.toISOString(),
