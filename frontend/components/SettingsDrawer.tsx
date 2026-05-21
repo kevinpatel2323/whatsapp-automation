@@ -3,6 +3,7 @@
 import { X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { SettingsPanel } from "@/components/SettingsPanel";
+import { AccountsManager } from "@/components/AccountsManager";
 
 interface SettingsDrawerProps {
   open: boolean;
@@ -47,8 +48,15 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
           </button>
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 sm:px-5 scrollbar-thin">
-          <SettingsPanel />
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 sm:px-5 scrollbar-thin space-y-5">
+          <section>
+            <h3 className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-text">Accounts</h3>
+            <AccountsManager />
+          </section>
+          <section>
+            <h3 className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-text">Auto-reply</h3>
+            <SettingsPanel />
+          </section>
         </div>
       </div>
     </>

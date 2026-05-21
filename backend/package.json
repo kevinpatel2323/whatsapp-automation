@@ -7,7 +7,9 @@
     "dev": "tsx watch src/index.ts",
     "start": "node --import=tsx src/index.ts",
     "build": "tsc",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "migration:run": "node --import=tsx/esm ../node_modules/typeorm/cli.js migration:run -d src/db/data-source.ts",
+    "migration:revert": "node --import=tsx/esm ../node_modules/typeorm/cli.js migration:revert -d src/db/data-source.ts"
   },
   "dependencies": {
     "@hapi/boom": "^10.0.1",

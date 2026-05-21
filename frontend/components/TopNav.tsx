@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { LayoutList, Loader2, Settings2, X } from "lucide-react";
 import { ConnectionBadge } from "@/components/ConnectionBadge";
+import { AccountChips } from "@/components/AccountChips";
 import type { ConnectionState } from "@/lib/types";
 
 interface TopNavProps {
@@ -47,11 +48,15 @@ export function TopNav({
         </div>
 
         <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
+          {/* AccountChips shows all accounts when >1; falls back to single ConnectionBadge */}
+          <div className="hidden sm:flex">
+            <AccountChips />
+          </div>
           <button
             type="button"
             onClick={onOpenConnection}
             disabled={busy}
-            className="inline-flex min-h-[44px] min-w-[44px] items-center gap-2 rounded-full border border-card-border bg-dark-forest/80 px-3 py-1.5 text-left transition hover:bg-white/10 disabled:opacity-45 sm:px-3.5"
+            className="inline-flex min-h-[44px] min-w-[44px] items-center gap-2 rounded-full border border-card-border bg-dark-forest/80 px-3 py-1.5 text-left transition hover:bg-white/10 disabled:opacity-45 sm:hidden sm:px-3.5"
             aria-label="Session and QR code"
           >
             {busy ? (

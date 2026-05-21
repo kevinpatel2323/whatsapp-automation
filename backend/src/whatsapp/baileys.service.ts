@@ -1,4 +1,6 @@
-import { rm } from "node:fs/promises";
+import path from "node:path";
+import { rm, mkdir, rename, readdir } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { type Boom } from "@hapi/boom";
 import makeWASocket, {
   BufferJSON,
@@ -17,10 +19,9 @@ import pino from "pino";
 import type { DataSource } from "typeorm";
 import type {
   ClassifiedMessagePayload,
-  MessagePayload,
   RealtimeEmits,
 } from "../realtime/socket.gateway.js";
-import { authDir } from "../config.js";
+import { authInfoRoot } from "../config.js";
 import { Message } from "../db/entities/Message.js";
 import { Chat } from "../db/entities/Chat.js";
 import { chatToPayload } from "../db/chat-serialize.js";
@@ -28,6 +29,13 @@ import { mapWAMessageToEntity, wamessageToStorableJson } from "./message-mapper.
 import * as qrcode from "qrcode";
 import type { createAutoReplyService } from "./auto-reply.service.js";
 import type { createClassificationService } from "./classification.service.js";
+import type { WhatsAppConnection } from "./connection.js";
+import {
+  contactDisplayName,
+  jidIsGroup,
+  messageToPayload,
+  previewFromMessage,
+} from "./baileys-utils.js";
 
 const baileysLogger = pino({ level: "silent" });
 const appLogger = pino({
@@ -42,94 +50,65 @@ function errMessage(e: unknown) {
   return e instanceof Error ? e.message : String(e);
 }
 
-function jidIsGroup(jid: string): boolean {
-  return jid.endsWith("@g.us");
-}
-
-function contactDisplayName(c: {
-  name?: string | null;
-  notify?: string | null;
-  verifiedName?: string | null;
-}): string | null {
-  const n = c.name?.trim() || c.notify?.trim() || c.verifiedName?.trim();
-  return n || null;
-}
-
-function previewFromMessage(me: Message): {
-  body: string;
-  type: string;
-  fromMe: boolean;
-  sender: string | null;
-} {
-  const rawBody =
-    me.body != null && String(me.body).trim().length > 0
-      ? String(me.body).trim()
-      : `(${me.messageType})`;
-  const body = rawBody.length > 512 ? `${rawBody.slice(0, 509)}…` : rawBody;
-  return {
-    body,
-    type: me.messageType,
-    fromMe: me.fromMe,
-    sender: me.fromMe ? null : (me.pushName?.trim() || null),
-  };
-}
-
-function toPayload(m: Message): MessagePayload {
-  return {
-    id: m.id,
-    remoteJid: m.remoteJid,
-    fromMe: m.fromMe,
-    participant: m.participant ?? null,
-    remoteJidAlt: m.remoteJidAlt ?? null,
-    participantAlt: m.participantAlt ?? null,
-    pushName: m.pushName ?? null,
-    messageType: m.messageType,
-    body: m.body ?? null,
-    messageTimestampMs: m.messageTimestampMs,
-    createdAt: m.createdAt.toISOString(),
-    intent: m.intent ?? null,
-    matchedMatch: m.matchedMatch ?? null,
-  };
-}
-
 type WASocketT = Awaited<ReturnType<typeof makeWASocket>>;
-
 type AutoReply = ReturnType<typeof createAutoReplyService>;
 type Classification = ReturnType<typeof createClassificationService>;
 
-/**
- * Create Baileys session + message persistence. Single session for this app.
- */
-export function createBaileysService(opts: {
-  dataSource: DataSource;
-  emit: RealtimeEmits;
-  autoReply: AutoReply;
-  classification: Classification;
-}) {
-  const { dataSource, emit, autoReply, classification } = opts;
-  const msgRepo = () => dataSource.getRepository(Message);
-  const chatRepo = () => dataSource.getRepository(Chat);
+export class BaileysConnection implements WhatsAppConnection {
+  readonly accountId: string;
+  readonly type = "baileys" as const;
 
-  let socket: WASocketT | null = null;
-  let isConnecting = false;
-  let sessionStatus: "idle" | "connecting" | "open" | "close" = "idle";
-  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly authDir: string;
+  private readonly dataSource: DataSource;
+  private readonly emit: RealtimeEmits;
+  private readonly autoReply: AutoReply;
+  private readonly classification: Classification;
 
-  function setSessionStatus(s: "idle" | "connecting" | "open" | "close") {
-    sessionStatus = s;
+  private socket: WASocketT | null = null;
+  private isConnecting = false;
+  private sessionStatus: "idle" | "connecting" | "open" | "close" = "idle";
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+  constructor(opts: {
+    accountId: string;
+    authDirSlug: string;
+    dataSource: DataSource;
+    emit: RealtimeEmits;
+    autoReply: AutoReply;
+    classification: Classification;
+  }) {
+    this.accountId = opts.accountId;
+    this.authDir = path.join(authInfoRoot, opts.authDirSlug);
+    this.dataSource = opts.dataSource;
+    this.emit = opts.emit;
+    this.autoReply = opts.autoReply;
+    this.classification = opts.classification;
   }
 
-  async function persistMessage(
+  private msgRepo() {
+    return this.dataSource.getRepository(Message);
+  }
+
+  private chatRepo() {
+    return this.dataSource.getRepository(Chat);
+  }
+
+  private setSessionStatus(s: "idle" | "connecting" | "open" | "close") {
+    this.sessionStatus = s;
+  }
+
+  private async persistMessage(
     m: WAMessage,
     opts: { doAutoReply?: boolean; skipChatEmit?: boolean } = {},
   ) {
     if (!m.key?.id || !m.key?.remoteJid) {
       return;
     }
+    const accountId = this.accountId;
     const raw = wamessageToStorableJson(m) as Record<string, unknown>;
     const { message: me, chatJid } = mapWAMessageToEntity(m, raw);
-    await autoReply.applyClassificationToMessage(me);
-    const existing = await chatRepo().findOne({ where: { jid: chatJid } });
+    await this.autoReply.applyClassificationToMessage(me);
+    const existing = await this.chatRepo().findOne({ where: { accountId, jid: chatJid } });
     const fromMe = me.fromMe;
     const nextUnread = !fromMe
       ? (existing?.unreadCount ?? 0) + 1
@@ -138,15 +117,17 @@ export function createBaileysService(opts: {
 
     let classifiedPayload: ClassifiedMessagePayload | null = null;
 
-    await dataSource.transaction(async (em) => {
+    await this.dataSource.transaction(async (em) => {
       const M = em.getRepository(Message);
       const C = em.getRepository(Chat);
-      // TypeORM deep-partial for jsonb is overly strict here
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      await M.upsert({ ...me } as any, { conflictPaths: ["id", "remoteJid", "fromMe"] });
+      await M.upsert({ ...me, accountId, provider: "baileys" } as any, {
+        conflictPaths: ["accountId", "id", "remoteJid", "fromMe"],
+      });
       const ts = new Date(Number(me.messageTimestampMs));
       await C.upsert(
         {
+          accountId,
           jid: chatJid,
           name: existing?.name ?? null,
           isGroup: jidIsGroup(chatJid),
@@ -157,51 +138,54 @@ export function createBaileysService(opts: {
           lastMessageFromMe: preview.fromMe,
           lastSenderName: preview.sender,
         },
-        { conflictPaths: ["jid"] },
+        { conflictPaths: ["accountId", "jid"] },
       );
-      const chatRow = await C.findOne({ where: { jid: chatJid } });
-      classifiedPayload = await classification.upsertInTransaction(em, me, chatRow);
+      const chatRow = await C.findOne({ where: { accountId, jid: chatJid } });
+      classifiedPayload = await this.classification.upsertInTransaction(em, { ...me, accountId }, chatRow);
     });
 
-    const saved = await msgRepo().findOne({
-      where: { id: me.id, remoteJid: me.remoteJid, fromMe: me.fromMe },
+    const saved = await this.msgRepo().findOne({
+      where: { accountId, id: me.id, remoteJid: me.remoteJid, fromMe: me.fromMe },
     });
     if (saved) {
-      emit.emitMessage(chatJid, toPayload(saved));
+      this.emit.emitMessage(accountId, chatJid, messageToPayload(accountId, saved));
     }
     if (classifiedPayload) {
-      emit.emitMessageClassified(chatJid, classifiedPayload);
+      this.emit.emitMessageClassified(accountId, chatJid, classifiedPayload);
     }
     if (!opts.skipChatEmit) {
-      const chatRow = await chatRepo().findOne({ where: { jid: chatJid } });
+      const chatRow = await this.chatRepo().findOne({ where: { accountId, jid: chatJid } });
       if (chatRow) {
-        emit.emitChatUpdated(chatToPayload(chatRow));
+        this.emit.emitChatUpdated(chatToPayload(chatRow));
       }
     }
     if (opts.doAutoReply && saved) {
-      await autoReply.maybeAutoReply(m, saved);
+      await this.autoReply.maybeAutoReply(m, saved, this);
     }
   }
 
-  async function emitChatIfPresent(jid: string) {
-    const row = await chatRepo().findOne({ where: { jid } });
-    if (row) emit.emitChatUpdated(chatToPayload(row));
+  private async emitChatIfPresent(jid: string) {
+    const row = await this.chatRepo().findOne({ where: { accountId: this.accountId, jid } });
+    if (row) this.emit.emitChatUpdated(chatToPayload(row));
   }
 
-  async function applyContactDisplay(jid: string, display: string | null) {
+  private async applyContactDisplay(jid: string, display: string | null) {
     if (!display?.trim()) return;
-    const existing = await chatRepo().findOne({ where: { jid } });
+    const name = display.trim().slice(0, 510);
+    const accountId = this.accountId;
+    const existing = await this.chatRepo().findOne({ where: { accountId, jid } });
     if (existing?.name?.trim()) return;
     if (existing) {
-      existing.name = display.trim();
+      existing.name = name;
       existing.isGroup = jidIsGroup(jid);
-      await chatRepo().save(existing);
-      emit.emitChatUpdated(chatToPayload(existing));
+      await this.chatRepo().save(existing);
+      this.emit.emitChatUpdated(chatToPayload(existing));
       return;
     }
-    await chatRepo().insert({
+    await this.chatRepo().insert({
+      accountId,
       jid,
-      name: display.trim(),
+      name,
       isGroup: jidIsGroup(jid),
       unreadCount: 0,
       lastMessageAt: null,
@@ -210,37 +194,38 @@ export function createBaileysService(opts: {
       lastMessageFromMe: null,
       lastSenderName: null,
     });
-    await emitChatIfPresent(jid);
+    await this.emitChatIfPresent(jid);
   }
 
-  async function handleHistoryMessages(msgs: WAMessage[]) {
+  private async handleHistoryMessages(msgs: WAMessage[]) {
     for (const m of msgs) {
       try {
-        await persistMessage(m, { skipChatEmit: true });
+        await this.persistMessage(m, { skipChatEmit: true });
       } catch (e) {
         appLogger.error({ err: e }, "persist (history) failed");
       }
     }
   }
 
-  const connect = async () => {
-    if (isConnecting) return;
-    isConnecting = true;
-    if (reconnectTimer) {
-      clearTimeout(reconnectTimer);
-      reconnectTimer = null;
+  async connect(): Promise<void> {
+    if (this.isConnecting) return;
+    this.isConnecting = true;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
     }
 
-    if (socket) {
-      isConnecting = false;
+    if (this.socket) {
+      this.isConnecting = false;
       return;
     }
 
-    setSessionStatus("connecting");
-    emit.emitConnection("connecting");
+    this.setSessionStatus("connecting");
+    this.emit.emitConnection(this.accountId, "connecting");
 
     try {
-      const { state, saveCreds } = await useMultiFileAuthState(authDir);
+      await mkdir(this.authDir, { recursive: true });
+      const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
       const { version } = await fetchLatestBaileysVersion();
 
       const s = makeWASocket({
@@ -250,14 +235,10 @@ export function createBaileysService(opts: {
         browser: Browsers.ubuntu("Chrome"),
         markOnlineOnConnect: true,
         logger: baileysLogger,
-        getMessage: async () => {
-          return undefined;
-        },
-        shouldSyncHistoryMessage: (_n: proto.Message.IHistorySyncNotification) => {
-          return true;
-        },
+        getMessage: async () => undefined,
+        shouldSyncHistoryMessage: (_n: proto.Message.IHistorySyncNotification) => true,
       });
-      socket = s;
+      this.socket = s;
 
       s.ev.on("creds.update", saveCreds);
 
@@ -266,7 +247,7 @@ export function createBaileysService(opts: {
         const doAutoReply = type === "notify";
         for (const m of messages) {
           try {
-            await persistMessage(m, { doAutoReply });
+            await this.persistMessage(m, { doAutoReply });
           } catch (e) {
             appLogger.error({ err: e }, "persist (upsert) failed");
           }
@@ -278,25 +259,25 @@ export function createBaileysService(opts: {
           for (const c of histContacts) {
             const jid = c.id;
             if (!jid) continue;
-            const display = contactDisplayName(c);
             try {
-              await applyContactDisplay(jid, display);
+              await this.applyContactDisplay(jid, contactDisplayName(c));
             } catch (e) {
               appLogger.error({ err: e }, "history contact upsert failed");
             }
           }
         }
         if (hist?.length) {
-          await handleHistoryMessages(hist);
+          await this.handleHistoryMessages(hist);
         }
       });
 
       s.ev.on("chats.upsert", (chatsArg: BaileysWAChat[]) => {
         void (async () => {
+          const accountId = this.accountId;
           for (const bc of chatsArg) {
             const jid = bc.id;
             if (!jid) continue;
-            const existing = await chatRepo().findOne({ where: { jid } });
+            const existing = await this.chatRepo().findOne({ where: { accountId, jid } });
             const cTs = bc.conversationTimestamp;
             const last =
               cTs != null
@@ -308,11 +289,12 @@ export function createBaileysService(opts: {
                 const meta = await s.groupMetadata(jid);
                 if (meta?.subject) name = meta.subject;
               } catch {
-                // ignore — group metadata may be unavailable briefly
+                // ignore
               }
             }
-            await chatRepo().upsert(
+            await this.chatRepo().upsert(
               {
+                accountId,
                 jid,
                 name,
                 isGroup: jidIsGroup(jid),
@@ -323,9 +305,9 @@ export function createBaileysService(opts: {
                 lastMessageFromMe: existing?.lastMessageFromMe ?? null,
                 lastSenderName: existing?.lastSenderName ?? null,
               },
-              { conflictPaths: ["jid"] },
+              { conflictPaths: ["accountId", "jid"] },
             );
-            await emitChatIfPresent(jid);
+            await this.emitChatIfPresent(jid);
           }
         })();
       });
@@ -336,7 +318,7 @@ export function createBaileysService(opts: {
             const jid = c.id;
             if (!jid) continue;
             try {
-              await applyContactDisplay(jid, contactDisplayName(c));
+              await this.applyContactDisplay(jid, contactDisplayName(c));
             } catch (e) {
               appLogger.error({ err: e }, "contacts.upsert failed");
             }
@@ -352,7 +334,7 @@ export function createBaileysService(opts: {
             const display = contactDisplayName(c);
             if (!display) continue;
             try {
-              await applyContactDisplay(jid, display);
+              await this.applyContactDisplay(jid, display);
             } catch (e) {
               appLogger.error({ err: e }, "contacts.update failed");
             }
@@ -362,12 +344,14 @@ export function createBaileysService(opts: {
 
       s.ev.on("groups.upsert", (groups: GroupMetadata[]) => {
         void (async () => {
+          const accountId = this.accountId;
           for (const g of groups) {
             const jid = g.id;
             if (!jid) continue;
-            const existing = await chatRepo().findOne({ where: { jid } });
-            await chatRepo().upsert(
+            const existing = await this.chatRepo().findOne({ where: { accountId, jid } });
+            await this.chatRepo().upsert(
               {
+                accountId,
                 jid,
                 name: g.subject,
                 isGroup: true,
@@ -378,24 +362,25 @@ export function createBaileysService(opts: {
                 lastMessageFromMe: existing?.lastMessageFromMe ?? null,
                 lastSenderName: existing?.lastSenderName ?? null,
               },
-              { conflictPaths: ["jid"] },
+              { conflictPaths: ["accountId", "jid"] },
             );
-            await emitChatIfPresent(jid);
+            await this.emitChatIfPresent(jid);
           }
         })();
       });
 
       s.ev.on("groups.update", (updates: Partial<GroupMetadata>[]) => {
         void (async () => {
+          const accountId = this.accountId;
           for (const u of updates) {
             const jid = u.id;
             if (!jid || u.subject == null) continue;
-            const row = await chatRepo().findOne({ where: { jid } });
+            const row = await this.chatRepo().findOne({ where: { accountId, jid } });
             if (!row) continue;
             row.name = u.subject;
             row.isGroup = true;
-            await chatRepo().save(row);
-            emit.emitChatUpdated(chatToPayload(row));
+            await this.chatRepo().save(row);
+            this.emit.emitChatUpdated(chatToPayload(row));
           }
         })();
       });
@@ -404,138 +389,195 @@ export function createBaileysService(opts: {
         const { connection, lastDisconnect, qr } = update;
 
         if (qr) {
-          emit.emitQR(qr);
+          this.emit.emitQR(this.accountId, qr);
           void qrcode
             .toString(qr, { type: "utf8" })
             .then((ascii) => {
-              appLogger.info("QR in terminal (UTF-8):\n" + ascii);
+              appLogger.info(`[${this.accountId}] QR in terminal:\n` + ascii);
             })
-            .catch(() => {
-              // ignore
-            });
+            .catch(() => undefined);
         }
 
         if (connection === "open") {
-          setSessionStatus("open");
-          emit.emitConnection("open");
+          this.setSessionStatus("open");
+          this.emit.emitConnection(this.accountId, "open");
         }
 
         if (connection === "close") {
-          setSessionStatus("close");
+          this.setSessionStatus("close");
           const boom = lastDisconnect?.error as Boom | undefined;
           const code = boom?.output?.statusCode;
           const loggedOut = code === DisconnectReason.loggedOut;
           if (loggedOut) {
-            void rm(authDir, { recursive: true, force: true }).catch(() => {
-              // ignore
-            });
-            socket = null;
-            emit.emitConnection("close");
+            void rm(this.authDir, { recursive: true, force: true }).catch(() => undefined);
+            this.socket = null;
+            this.emit.emitConnection(this.accountId, "close");
           } else {
-            socket = null;
-            emit.emitConnection("connecting");
-            reconnectTimer = setTimeout(() => {
-              void connect();
+            this.socket = null;
+            this.emit.emitConnection(this.accountId, "connecting");
+            this.reconnectTimer = setTimeout(() => {
+              void this.connect();
             }, 3_000);
           }
         }
       });
     } catch (e) {
       appLogger.error(e, "connect failed");
-      setSessionStatus("close");
-      emit.emitConnection("close");
+      this.setSessionStatus("close");
+      this.emit.emitConnection(this.accountId, "close");
     } finally {
-      isConnecting = false;
+      this.isConnecting = false;
     }
-  };
+  }
 
-  return {
-    getSocket: () => socket,
-    getUserJid: () => socket?.user?.id,
-    getStatus: () => sessionStatus,
-
-    async start() {
-      if (reconnectTimer) {
-        return { ok: true as const, state: "reconnecting" as const };
-      }
-      if (isConnecting) {
-        return { ok: true as const, state: "connecting" as const };
-      }
-      if (socket) {
-        return { ok: true as const, state: "already" as const };
-      }
+  async disconnect(): Promise<void> {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    if (this.socket) {
       try {
-        await connect();
-        return { ok: true as const, state: "created" as const };
-      } catch (e) {
-        return { ok: false as const, error: errMessage(e) };
+        (this.socket as { end: (r: undefined) => void }).end(undefined);
+      } catch {
+        // ignore
       }
-    },
+      this.socket = null;
+    }
+    this.setSessionStatus("close");
+  }
 
-    async logout() {
-      if (reconnectTimer) {
-        clearTimeout(reconnectTimer);
-        reconnectTimer = null;
-      }
-      try {
-        if (socket) {
-          if (typeof socket.logout === "function") {
-            await socket.logout();
-          } else {
-            (socket as { end: (r: undefined) => void }).end(undefined);
-          }
-        }
-        socket = null;
-        await rm(authDir, { recursive: true, force: true });
-        setSessionStatus("close");
-        emit.emitConnection("close");
-        return { ok: true as const };
-      } catch (e) {
-        return { ok: false as const, error: errMessage(e) };
-      }
-    },
-
-    async sendText(
-      jid: string,
-      text: string,
-      opts?: {
-        /** Same shape as auto-reply private reply: quote a group (or chat) message in the outgoing DM. */
-        quoted?: { remoteJid: string; messageId: string; fromMe: boolean };
-      },
-    ) {
-      const sock = socket;
-      if (!sock) {
-        return { ok: false as const, error: "Not connected" };
-      }
-      const trimmed = text.trim();
-      if (!trimmed) {
-        return { ok: false as const, error: "Empty message" };
-      }
-      let quotedWam: WAMessage | undefined;
-      if (opts?.quoted) {
-        const { remoteJid, messageId, fromMe } = opts.quoted;
-        const row = await msgRepo().findOne({
-          where: { id: messageId, remoteJid, fromMe },
-        });
-        if (!row?.rawJson) {
-          return { ok: false as const, error: "Quoted message not found" };
-        }
-        try {
-          quotedWam = JSON.parse(JSON.stringify(row.rawJson), BufferJSON.reviver) as WAMessage;
-        } catch (e) {
-          return { ok: false as const, error: `Invalid quoted message: ${errMessage(e)}` };
+  async logout(): Promise<{ ok: true } | { ok: false; error: string }> {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    try {
+      if (this.socket) {
+        if (typeof this.socket.logout === "function") {
+          await this.socket.logout();
+        } else {
+          (this.socket as { end: (r: undefined) => void }).end(undefined);
         }
       }
-      try {
-        await sock.sendMessage(
-          jid,
-          { text: trimmed },
-          quotedWam ? { quoted: quotedWam } : undefined,
-        );
-        return { ok: true as const };
-      } catch (e) {
-        return { ok: false as const, error: errMessage(e) };
-      }
+      this.socket = null;
+      await rm(this.authDir, { recursive: true, force: true });
+      this.setSessionStatus("close");
+      this.emit.emitConnection(this.accountId, "close");
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: errMessage(e) };
+    }
+  }
+
+  getStatus(): "idle" | "connecting" | "open" | "close" {
+    return this.sessionStatus;
+  }
+
+  getUserIdentifier(): string | undefined {
+    return this.socket?.user?.id;
+  }
+
+  getRawSocket() {
+    return this.socket;
+  }
+
+  canSendFreeformOutsideWindow(): boolean {
+    return true;
+  }
+
+  canQuoteMessages(): boolean {
+    return true;
+  }
+
+  canJoinGroups(): boolean {
+    return true;
+  }
+
+  async start(): Promise<{ ok: true; state: string } | { ok: false; error: string }> {
+    if (this.reconnectTimer) return { ok: true, state: "reconnecting" };
+    if (this.isConnecting) return { ok: true, state: "connecting" };
+    if (this.socket) return { ok: true, state: "already" };
+    try {
+      await this.connect();
+      return { ok: true, state: "created" };
+    } catch (e) {
+      return { ok: false, error: errMessage(e) };
+    }
+  }
+
+  async sendText(
+    jid: string,
+    text: string,
+    opts?: {
+      quoted?: { remoteJid: string; messageId: string; fromMe: boolean };
+      contextWamid?: string;
     },
-  };
+  ): Promise<{ ok: true; providerMessageId?: string } | { ok: false; error: string }> {
+    const sock = this.socket;
+    if (!sock) return { ok: false, error: "Not connected" };
+    const trimmed = text.trim();
+    if (!trimmed) return { ok: false, error: "Empty message" };
+
+    let quotedWam: WAMessage | undefined;
+    if (opts?.quoted) {
+      const { remoteJid, messageId, fromMe } = opts.quoted;
+      const row = await this.msgRepo().findOne({
+        where: { accountId: this.accountId, id: messageId, remoteJid, fromMe },
+      });
+      if (!row?.rawJson) return { ok: false, error: "Quoted message not found" };
+      try {
+        quotedWam = JSON.parse(JSON.stringify(row.rawJson), BufferJSON.reviver) as WAMessage;
+      } catch (e) {
+        return { ok: false, error: `Invalid quoted message: ${errMessage(e)}` };
+      }
+    }
+    try {
+      const result = await sock.sendMessage(
+        jid,
+        { text: trimmed },
+        quotedWam ? { quoted: quotedWam } : undefined,
+      );
+      return { ok: true, providerMessageId: result?.key?.id ?? undefined };
+    } catch (e) {
+      return { ok: false, error: errMessage(e) };
+    }
+  }
+
+  async sendTemplate(): Promise<{ ok: false; error: string }> {
+    return { ok: false, error: "Templates not supported on Baileys transport" };
+  }
+}
+
+/**
+ * Migrate legacy flat auth_info files into the primary slug subdirectory.
+ * Safe to call multiple times — exits early if migration already done.
+ */
+export async function migrateLegacyAuthInfo(primarySlug: string): Promise<void> {
+  const slugDir = path.join(authInfoRoot, primarySlug);
+  if (existsSync(slugDir)) return;
+
+  try {
+    const files = await readdir(authInfoRoot);
+    const legacyFiles = files.filter((f) => !f.startsWith(".") && f !== primarySlug);
+    if (legacyFiles.length === 0) return;
+    await mkdir(slugDir, { recursive: true });
+    for (const f of legacyFiles) {
+      await rename(path.join(authInfoRoot, f), path.join(slugDir, f)).catch(() => undefined);
+    }
+    appLogger.info({ primarySlug }, "Migrated legacy auth_info files to slug subdirectory");
+  } catch {
+    // If authInfoRoot doesn't exist yet, that's fine — it'll be created on connect
+  }
+}
+
+/** Factory kept for backward compatibility in Phase 1. */
+export function createBaileysService(opts: {
+  accountId: string;
+  authDirSlug: string;
+  dataSource: DataSource;
+  emit: RealtimeEmits;
+  autoReply: ReturnType<typeof createAutoReplyService>;
+  classification: ReturnType<typeof createClassificationService>;
+}): BaileysConnection {
+  return new BaileysConnection(opts);
 }

@@ -1,0 +1,32 @@
+name: frontend
+type: Load Balanced Web Service
+
+http:
+  path: '/'
+  alias: 'wa.tachyontechlabs.com'
+  healthcheck:
+    path: '/'
+    grace_period: 30s
+
+image:
+  build:
+    dockerfile: frontend/Dockerfile
+    context: .
+    args:
+      NEXT_PUBLIC_SOCKETIO_PATH: '/api/socket.io/'
+  port: 3100
+
+cpu: 256
+memory: 512
+platform: linux/x86_64
+count: 1
+exec: true
+
+network:
+  connect: true
+
+variables:
+  NODE_ENV: production
+  PORT: '3100'
+  HOSTNAME: '0.0.0.0'
+  NEXT_PUBLIC_SOCKETIO_PATH: '/api/socket.io/'

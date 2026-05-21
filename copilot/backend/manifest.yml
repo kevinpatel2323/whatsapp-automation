@@ -1,0 +1,53 @@
+name: backend
+type: Load Balanced Web Service
+
+http:
+  path: '/api'
+  alias: 'wa.tachyontechlabs.com'
+  healthcheck:
+    path: '/health'
+    grace_period: 60s
+  stickiness: true
+
+image:
+  build:
+    dockerfile: backend/Dockerfile
+    context: .
+  port: 4100
+
+cpu: 1024
+memory: 2048
+platform: linux/x86_64
+count: 1
+exec: true
+
+deployment:
+  rolling: 'recreate'
+
+storage:
+  volumes:
+    auth_info:
+      path: /app/backend/auth_info
+      read_only: false
+      efs: true
+
+network:
+  connect: true
+  vpc:
+    security_groups:
+      - from_cfn: ${COPILOT_APPLICATION_NAME}-${COPILOT_ENVIRONMENT_NAME}-wadbSecurityGroup
+
+variables:
+  NODE_ENV: production
+  BACKEND_PORT: '4100'
+  FRONTEND_ORIGIN: 'https://wa.tachyontechlabs.com'
+  WABA_WEBHOOK_BASE_URL: 'https://wa.tachyontechlabs.com'
+  DATABASE_SSL: 'true'
+  SOCKETIO_PATH: '/api/socket.io/'
+  TYPEORM_SYNC: 'false'
+  RUN_MIGRATIONS: 'false'
+
+secrets:
+  DATABASE_SECRET:
+    from_cfn: ${COPILOT_APPLICATION_NAME}-${COPILOT_ENVIRONMENT_NAME}-wadbAuroraSecret
+  WABA_ENCRYPTION_KEY: /copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/WABA_ENCRYPTION_KEY

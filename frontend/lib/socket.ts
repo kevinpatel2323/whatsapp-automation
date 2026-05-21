@@ -10,7 +10,7 @@ export function getSocket(): Socket {
   if (!socket) {
     const url = apiBase();
     socket = io(url, {
-      path: "/socket.io/",
+      path: process.env.NEXT_PUBLIC_SOCKETIO_PATH ?? "/socket.io/",
       transports: ["websocket", "polling"],
       reconnection: true,
       reconnectionDelay: 500,

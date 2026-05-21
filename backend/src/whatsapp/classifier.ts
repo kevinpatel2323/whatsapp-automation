@@ -40,6 +40,22 @@ export type ClassifyRichResult = {
   rawSnippet: string;
 };
 
+/**
+ * Playoff stage labels — when present in `matchLabels`, these win over team-pair
+ * labels in the same message (e.g. "MI vs CSK Qualifier 1" → "Qualifier 1").
+ * Aliases catch the common variants people actually type.
+ */
+const STAGE_ALIASES: Record<string, string> = {
+  "Qualifier 1": String.raw`q(?:f|ual(?:ifier)?)?\s*[-]?\s*1|qualifier\s*one`,
+  "Qualifier 2": String.raw`q(?:f|ual(?:ifier)?)?\s*[-]?\s*2|qualifier\s*two`,
+  "Eliminator":  String.raw`eliminator|elim(?:i)?`,
+  "Final":       String.raw`grand\s*final|finale?`,
+};
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 const TEAM_ALIASES: Record<string, string> = {
   MI: String.raw`(?:mi|mivscsk|mivs?csk|mumbai(?:\s*indians)?)`,
   CSK: String.raw`(?:csk|chennai(?:\s*super(?:\s*kings)?)?)`,
@@ -180,22 +196,46 @@ function computeBuySellIntent(body: string, s: string): ClassifiedIntent {
   return "buy";
 }
 
-/** First label from `matchLabels` whose teams appear in `s` (normalized) */
+/**
+ * Resolve which configured label fires for a normalized message body.
+ * Two-pass: known playoff stages win over team pairs when both are present in
+ * the same message. Within each pass, list order from settings is honored.
+ */
 function matchConfigured(s: string, matchLabels: string[]): string | null {
   for (const label of matchLabels) {
+    const stagePattern = STAGE_ALIASES[label];
+    if (!stagePattern) continue;
+    if (new RegExp(`\\b(?:${stagePattern})\\b`, "i").test(s)) return label;
+  }
+  for (const label of matchLabels) {
+    if (label in STAGE_ALIASES) continue;
     const pair = splitMatchLabel(label);
-    if (!pair) {
+    if (pair) {
+      const { reBoth } = twoTeamRegexForLabel(pair);
+      if (reBoth.test(s) || hasTeamsNear(s, pair, 40)) return label;
       continue;
     }
-    const { reBoth } = twoTeamRegexForLabel(pair);
-    if (reBoth.test(s)) {
-      return label;
-    }
-    if (hasTeamsNear(s, pair, 40)) {
-      return label;
-    }
+    if (new RegExp(`\\b${escapeRegex(label)}\\b`, "i").test(s)) return label;
   }
   return null;
+}
+
+/**
+ * First playoff stage label whose alias matches the (already stripped) text,
+ * preferring the earliest occurrence in the message. Used for the dashboard /
+ * classified_messages view so unconfigured stages still get categorized.
+ */
+export function detectStage(s: string): string | null {
+  const lower = stripNoise(s);
+  let best: { label: string; idx: number } | null = null;
+  for (const [label, pattern] of Object.entries(STAGE_ALIASES)) {
+    const re = new RegExp(`\\b(?:${pattern})\\b`, "i");
+    const m = re.exec(lower);
+    if (m?.index != null && (best == null || m.index < best.idx)) {
+      best = { label, idx: m.index };
+    }
+  }
+  return best?.label ?? null;
 }
 
 /**
@@ -271,7 +311,8 @@ export function classifyTextRich(
   let matchedMatch = matchConfigured(s, matchLabels);
   let isConfiguredMatch = matchedMatch != null;
   if (!matchedMatch) {
-    matchedMatch = detectAnyPairing(s);
+    // Stage detection beats team-pair detection (e.g. "MI vs CSK Qualifier 1" → "Qualifier 1")
+    matchedMatch = detectStage(s) ?? detectAnyPairing(s);
     isConfiguredMatch = false;
   }
   const seq = extractSequence(body);

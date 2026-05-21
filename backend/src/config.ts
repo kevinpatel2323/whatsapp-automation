@@ -4,16 +4,36 @@ import { fileURLToPath } from "node:url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-/** `backend/auth_info` — next to `src/`, ESM-safe */
-export const authDir = path.join(__dirname, "../auth_info");
+/** `backend/auth_info` — root dir for per-account auth subdirectories */
+export const authInfoRoot = path.join(__dirname, "../auth_info");
+
+/** Deterministic UUID for the seeded primary Baileys account. Also set in Migration 001. */
+export const PRIMARY_BAILEYS_ACCOUNT_ID =
+  process.env.PRIMARY_BAILEYS_ACCOUNT_ID ?? "00000000-0000-4000-a000-000000000001";
+
+function resolveDatabaseUrl(): string {
+  if (process.env.DATABASE_URL) return process.env.DATABASE_URL;
+  if (process.env.DATABASE_SECRET) {
+    const s = JSON.parse(process.env.DATABASE_SECRET) as {
+      username: string;
+      password: string;
+      host: string;
+      port: number | string;
+      dbname: string;
+    };
+    const u = encodeURIComponent(s.username);
+    const p = encodeURIComponent(s.password);
+    return `postgres://${u}:${p}@${s.host}:${s.port}/${s.dbname}`;
+  }
+  return "postgres://postgres:postgres@localhost:5432/wa_automation";
+}
 
 export const config = {
   port: Number(process.env.BACKEND_PORT ?? 4100),
   frontendOrigin: process.env.FRONTEND_ORIGIN ?? "http://localhost:3100",
-  databaseUrl: process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5432/wa_automation",
-  /** false in production — use migrations */
-  typeormSync:
-    process.env.TYPEORM_SYNC === "true" || process.env.TYPEORM_SYNC == null,
+  databaseUrl: resolveDatabaseUrl(),
+  /** Only true when TYPEORM_SYNC=true is set explicitly — use migrations in all other cases */
+  typeormSync: process.env.TYPEORM_SYNC === "true",
   autoReply: {
     enabled: process.env.AUTO_REPLY_ENABLED !== "false",
     buyEnabled: process.env.AUTO_REPLY_BUY !== "false",

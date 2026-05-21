@@ -3,6 +3,7 @@ import type { ChatRowPayload } from "../realtime/socket.gateway.js";
 
 export function chatToPayload(c: Chat): ChatRowPayload {
   return {
+    accountId: c.accountId,
     jid: c.jid,
     name: c.name ?? null,
     isGroup: Boolean(c.isGroup),

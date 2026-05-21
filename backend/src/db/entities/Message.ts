@@ -1,9 +1,12 @@
 import { Column, Entity, Index, PrimaryColumn, CreateDateColumn } from "typeorm";
 
 @Entity({ name: "messages" })
-@Index("idx_messages_remote_ts", ["remoteJid", "messageTimestampMs"])
+@Index("idx_messages_account_remote_ts", ["accountId", "remoteJid", "messageTimestampMs"])
 export class Message {
-  /** key.id from WhatsApp */
+  @PrimaryColumn("uuid", { name: "account_id" })
+  accountId!: string;
+
+  /** key.id from WhatsApp / wamid from WABA */
   @PrimaryColumn("varchar", { length: 128 })
   id!: string;
 
@@ -12,6 +15,10 @@ export class Message {
 
   @PrimaryColumn("boolean", { default: false })
   fromMe!: boolean;
+
+  /** Transport that delivered this message */
+  @Column("varchar", { length: 16, default: "baileys" })
+  provider!: "baileys" | "waba";
 
   @Column("varchar", { length: 512, nullable: true })
   participant?: string | null;
@@ -37,7 +44,7 @@ export class Message {
   @Column("jsonb", { name: "raw" })
   rawJson!: Record<string, unknown>;
 
-  /** `buy` | `sell` | `none` — from ticket intent classifier (only meaningful when a match was detected) */
+  /** `buy` | `sell` | `none` — from ticket intent classifier */
   @Column("varchar", { length: 8, nullable: true })
   intent?: string | null;
 

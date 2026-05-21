@@ -1,5 +1,15 @@
 import { Column, CreateDateColumn, Entity, PrimaryColumn, UpdateDateColumn } from "typeorm";
 
+export type ReplyRoutingMode = "baileys-text" | "waba-text" | "waba-template";
+
+export interface MatchRouting {
+  accountId: string;
+  mode: ReplyRoutingMode;
+  templateId?: string | null;
+  /** Template param values as templates, e.g. { "1": "Hi {{senderName}}" } */
+  templateParamsTemplate?: Record<string, string> | null;
+}
+
 @Entity({ name: "auto_reply_settings" })
 export class AutoReplySettings {
   @PrimaryColumn("int", { default: 1 })
@@ -38,6 +48,19 @@ export class AutoReplySettings {
    */
   @Column("jsonb", { name: "reply_exclusions", default: () => "'[]'" })
   replyExclusions!: Array<{ name: string; value: string }>;
+
+  /**
+   * Per-match routing config. Keys = match label, values = MatchRouting.
+   * Default (missing key) is baileys-text so existing rules are unchanged.
+   */
+  @Column("jsonb", { name: "reply_routing", default: () => "'{}'" })
+  replyRouting!: Record<string, MatchRouting>;
+
+  /**
+   * Fallback routing when a match label has no entry in replyRouting.
+   */
+  @Column("jsonb", { name: "default_routing", nullable: true })
+  defaultRouting?: MatchRouting | null;
 
   @CreateDateColumn({ type: "timestamptz" })
   createdAt!: Date;

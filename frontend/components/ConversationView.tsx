@@ -16,6 +16,10 @@ import {
 } from "@/lib/whatsapp-display";
 import { ChatAvatar } from "@/components/ChatAvatar";
 import { Composer } from "@/components/Composer";
+import { AccountSelector } from "@/components/AccountSelector";
+import { TemplatePicker } from "@/components/TemplatePicker";
+import { checkWabaWindow } from "@/lib/waba-window";
+import type { MessageTemplate } from "@/lib/types";
 import { ChevronLeft, Radio, X } from "lucide-react";
 
 type MessagesResp = { messages: MessageDto[] };
@@ -92,6 +96,9 @@ export function ConversationView({
   const [items, setItems] = useState<MessageDto[]>([]);
   const [loading, setLoading] = useState(true);
   const [fetchErr, setFetchErr] = useState<string | null>(null);
+  const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
+  const [showTemplatePicker, setShowTemplatePicker] = useState(false);
+  const [pendingText, setPendingText] = useState<string | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const isOpen = String(conn) === "open";
 
@@ -174,14 +181,21 @@ export function ConversationView({
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [items.length, jid, loading]);
 
-  const handleSend = async (text: string) => {
-    const body: Record<string, unknown> = { jid, text };
-    if (privateReplyQuote) {
-      body.quotedGroupMessage = {
-        remoteJid: privateReplyQuote.remoteJid,
-        messageId: privateReplyQuote.messageId,
-        fromMe: privateReplyQuote.fromMe,
-      };
+  const sendDirect = async (text: string, templateId?: string, templateParams?: Record<string, string>) => {
+    const body: Record<string, unknown> = { jid };
+    if (selectedAccountId) body.accountId = selectedAccountId;
+    if (templateId) {
+      body.templateId = templateId;
+      if (templateParams) body.templateParams = templateParams;
+    } else {
+      body.text = text;
+      if (privateReplyQuote) {
+        body.quotedGroupMessage = {
+          remoteJid: privateReplyQuote.remoteJid,
+          messageId: privateReplyQuote.messageId,
+          fromMe: privateReplyQuote.fromMe,
+        };
+      }
     }
     await postJson<{ ok: boolean }>("/api/messages/send", body);
     if (privateReplyQuote) {
@@ -189,7 +203,38 @@ export function ConversationView({
     }
   };
 
+  const handleSend = async (text: string) => {
+    // For WABA sends, check the 24h window first
+    if (selectedAccountId) {
+      const accountsResp = await getJson<{ accounts: Array<{ id: string; type: string }> }>("/api/accounts");
+      const account = accountsResp.accounts.find((a) => a.id === selectedAccountId);
+      if (account?.type === "waba") {
+        const inWindow = await checkWabaWindow(selectedAccountId, jid);
+        if (!inWindow) {
+          setPendingText(text);
+          setShowTemplatePicker(true);
+          return;
+        }
+      }
+    }
+    await sendDirect(text);
+  };
+
+  const handleTemplateSelect = async (template: MessageTemplate, params: Record<string, string>) => {
+    setShowTemplatePicker(false);
+    await sendDirect(pendingText ?? "", template.name, params);
+    setPendingText(null);
+  };
+
   return (
+    <>
+    {showTemplatePicker && selectedAccountId && (
+      <TemplatePicker
+        accountId={selectedAccountId}
+        onSelect={(t, p) => void handleTemplateSelect(t, p)}
+        onClose={() => { setShowTemplatePicker(false); setPendingText(null); }}
+      />
+    )}
     <section
       className={cn(
         "flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-card-border/90 bg-gradient-to-b from-dark-forest/60 to-deep-teal/50 shadow-card backdrop-blur-sm",
@@ -323,11 +368,20 @@ export function ConversationView({
         </div>
       ) : null}
 
+      <AccountSelector
+        selectedAccountId={selectedAccountId}
+        onSelect={setSelectedAccountId}
+        hideIfSingle
+        disableWabaForGroup
+        jid={jid}
+        className="px-3 pb-1 pt-2"
+      />
       <Composer
         disabled={!isOpen}
         onSend={handleSend}
         placeholder={isOpen ? "Message" : "Connect to send messages"}
       />
     </section>
+    </>
   );
 }

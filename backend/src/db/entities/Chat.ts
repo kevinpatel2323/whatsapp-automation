@@ -1,8 +1,11 @@
 import { Column, Entity, Index, PrimaryColumn, UpdateDateColumn } from "typeorm";
 
 @Entity({ name: "chats" })
-@Index("idx_chats_last_message", ["lastMessageAt"])
+@Index("idx_chats_account_last_message", ["accountId", "lastMessageAt"])
 export class Chat {
+  @PrimaryColumn("uuid", { name: "account_id" })
+  accountId!: string;
+
   @PrimaryColumn("varchar", { length: 512 })
   jid!: string;
 

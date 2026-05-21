@@ -7,9 +7,12 @@ import {
 } from "typeorm";
 
 @Entity({ name: "classified_messages" })
-@Index("idx_cls_match_intent", ["matchedMatch", "intent"])
-@Index("idx_cls_remote_ts", ["remoteJid", "messageTimestampMs"])
+@Index("idx_cls_account_match_intent", ["accountId", "matchedMatch", "intent"])
+@Index("idx_cls_account_remote_ts", ["accountId", "remoteJid", "messageTimestampMs"])
 export class ClassifiedMessage {
+  @PrimaryColumn("uuid", { name: "account_id" })
+  accountId!: string;
+
   @PrimaryColumn("varchar", { length: 128 })
   messageId!: string;
 

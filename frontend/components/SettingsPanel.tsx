@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { getJson, patchJson } from "@/lib/api";
-import type { AutoReplySettingsDto, ReplyExclusionDto } from "@/lib/types";
+import type { Account, AutoReplySettingsDto, MatchRouting, MessageTemplate, ReplyExclusionDto } from "@/lib/types";
+import { fetchAccounts, fetchTemplates } from "@/lib/accounts";
 import { Plus, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useSocketEvent } from "@/lib/use-socket-event";
@@ -20,20 +21,22 @@ const empty: AutoReplySettingsDto = {
   updatedAt: "",
 };
 
-type MatchRow = { key: string; match: string; text: string };
+type MatchRow = { key: string; match: string; text: string; routing: MatchRouting | null };
 
 function newRow(): MatchRow {
-  return { key: crypto.randomUUID(), match: "", text: "" };
+  return { key: crypto.randomUUID(), match: "", text: "", routing: null };
 }
 
 function rowsFromDto(d: AutoReplySettingsDto): MatchRow[] {
   const mr = d.matchReplies ?? {};
+  const routing = d.replyRouting ?? {};
   const fromMap = Object.entries(mr);
   if (fromMap.length > 0) {
     return fromMap.map(([k, v]) => ({
       key: crypto.randomUUID(),
       match: k,
       text: v,
+      routing: routing[k] ?? null,
     }));
   }
   const labels = d.matches ?? [];
@@ -42,6 +45,7 @@ function rowsFromDto(d: AutoReplySettingsDto): MatchRow[] {
       key: crypto.randomUUID(),
       match: label,
       text: "",
+      routing: routing[label] ?? null,
     }));
   }
   return [newRow()];
@@ -112,6 +116,8 @@ export function SettingsPanel() {
   const [err, setErr] = useState<string | null>(null);
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
   const [externalUpdate, setExternalUpdate] = useState(false);
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [templatesByAccount, setTemplatesByAccount] = useState<Record<string, MessageTemplate[]>>({});
 
   const applyDto = useCallback((d: AutoReplySettingsDto) => {
     setS(d);
@@ -130,7 +136,23 @@ export function SettingsPanel() {
 
   useEffect(() => {
     void load();
+    fetchAccounts()
+      .then((accts) => setAccounts(accts))
+      .catch(() => {/* non-fatal */});
   }, [load]);
+
+  const loadTemplatesForAccount = useCallback(async (accountId: string) => {
+    if (templatesByAccount[accountId]) return;
+    try {
+      const d = await fetchTemplates(accountId);
+      setTemplatesByAccount((prev) => ({
+        ...prev,
+        [accountId]: d.templates.filter((t) => t.status === "APPROVED"),
+      }));
+    } catch {
+      // non-fatal
+    }
+  }, [templatesByAccount]);
 
   useSocketEvent("settings:updated", (d) => {
     const p = d as AutoReplySettingsDto;
@@ -159,6 +181,18 @@ export function SettingsPanel() {
       const next = prev.filter((r) => r.key !== key);
       return next.length > 0 ? next : [newRow()];
     });
+  };
+
+  const updateRowRouting = (key: string, patch: Partial<MatchRouting> | null) => {
+    clearExternal();
+    setRows((prev) =>
+      prev.map((r) => {
+        if (r.key !== key) return r;
+        if (patch === null) return { ...r, routing: null };
+        const existing = r.routing ?? { accountId: "", mode: "baileys-text" as const };
+        return { ...r, routing: { ...existing, ...patch } };
+      }),
+    );
   };
 
   const updateExclRow = (key: string, field: "name" | "value", value: string) => {
@@ -197,6 +231,13 @@ export function SettingsPanel() {
         if (!v) continue;
         replyExclusions.push({ name: r.name.trim(), value: v });
       }
+      const replyRouting: Record<string, MatchRouting> = {};
+      for (const r of rows) {
+        const label = r.match.trim();
+        if (label && r.routing && r.routing.mode !== "baileys-text") {
+          replyRouting[label] = r.routing;
+        }
+      }
       const d = await patchJson<AutoReplySettingsDto>("/api/settings", {
         enabled: s.enabled,
         buyEnabled: s.buyEnabled,
@@ -207,6 +248,7 @@ export function SettingsPanel() {
         replyText: s.replyText,
         cooldownMinutes: s.cooldownMinutes,
         replyExclusions,
+        replyRouting,
       });
       applyDto(d);
       setSavedMsg("Saved.");
@@ -318,7 +360,13 @@ export function SettingsPanel() {
             Add match
           </button>
         </div>
-        {rows.map((row) => (
+        {rows.map((row) => {
+          const mode = row.routing?.mode ?? "baileys-text";
+          const routingAccountId = row.routing?.accountId ?? "";
+          const wabaAccounts = accounts.filter((a) => a.type === "waba");
+          const rowTemplates: MessageTemplate[] = routingAccountId ? (templatesByAccount[routingAccountId] ?? []) : [];
+
+          return (
           <div
             key={row.key}
             className="space-y-1.5 rounded-lg border border-shade-70 p-3 bg-dark-forest"
@@ -333,14 +381,18 @@ export function SettingsPanel() {
                   placeholder="DC vs RCB"
                   disabled={!s.enabled}
                 />
-                <p className="text-[10px] text-muted-text">Message for this match</p>
-                <textarea
-                  className={cn(inputCls, "min-h-[3.5rem]")}
-                  value={row.text}
-                  onChange={(e) => updateRow(row.key, "text", e.target.value)}
-                  placeholder="Your DM text…"
-                  disabled={!s.enabled}
-                />
+                {mode !== "waba-template" && (
+                  <>
+                    <p className="text-[10px] text-muted-text">Message for this match</p>
+                    <textarea
+                      className={cn(inputCls, "min-h-[3.5rem]")}
+                      value={row.text}
+                      onChange={(e) => updateRow(row.key, "text", e.target.value)}
+                      placeholder="Your DM text…"
+                      disabled={!s.enabled}
+                    />
+                  </>
+                )}
               </div>
               <button
                 type="button"
@@ -352,8 +404,107 @@ export function SettingsPanel() {
                 <Trash2 className="h-3.5 w-3.5" />
               </button>
             </div>
+
+            {/* Routing section */}
+            <div className="pt-1 border-t border-shade-70/50 space-y-1.5">
+              <p className="text-[10px] text-muted-text">Send via</p>
+              <select
+                className={cn(inputCls, "cursor-pointer")}
+                value={mode}
+                disabled={!s.enabled}
+                onChange={(e) => {
+                  const m = e.target.value as MatchRouting["mode"];
+                  if (m === "baileys-text") {
+                    updateRowRouting(row.key, null);
+                  } else {
+                    updateRowRouting(row.key, { mode: m, accountId: routingAccountId || (wabaAccounts[0]?.id ?? "") });
+                    const loadId = routingAccountId || (wabaAccounts[0]?.id ?? "");
+                    if (m === "waba-template" && loadId) {
+                      void loadTemplatesForAccount(loadId);
+                    }
+                  }
+                }}
+              >
+                <option value="baileys-text">Baileys (default)</option>
+                <option value="waba-text">WABA — text</option>
+                <option value="waba-template">WABA — template</option>
+              </select>
+
+              {(mode === "waba-text" || mode === "waba-template") && wabaAccounts.length > 0 && (
+                <>
+                  <p className="text-[10px] text-muted-text">WABA account</p>
+                  <select
+                    className={cn(inputCls, "cursor-pointer")}
+                    value={routingAccountId}
+                    disabled={!s.enabled}
+                    onChange={(e) => {
+                      updateRowRouting(row.key, { accountId: e.target.value });
+                      if (mode === "waba-template" && e.target.value) {
+                        void loadTemplatesForAccount(e.target.value);
+                      }
+                    }}
+                  >
+                    <option value="">— pick account —</option>
+                    {wabaAccounts.map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {a.displayName}{a.phoneE164 ? ` (${a.phoneE164})` : ""}
+                      </option>
+                    ))}
+                  </select>
+                </>
+              )}
+
+              {mode === "waba-template" && routingAccountId && (
+                <>
+                  <p className="text-[10px] text-muted-text">Template</p>
+                  <select
+                    className={cn(inputCls, "cursor-pointer")}
+                    value={row.routing?.templateId ?? ""}
+                    disabled={!s.enabled}
+                    onChange={(e) => updateRowRouting(row.key, { templateId: e.target.value || null })}
+                  >
+                    <option value="">— pick template —</option>
+                    {rowTemplates.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.name} ({t.language})
+                      </option>
+                    ))}
+                  </select>
+
+                  {row.routing?.templateId && (() => {
+                    const tpl = rowTemplates.find((t) => t.id === row.routing?.templateId);
+                    if (!tpl || tpl.placeholders.length === 0) return null;
+                    const params = row.routing.templateParamsTemplate ?? {};
+                    return (
+                      <div className="space-y-1">
+                        <p className="text-[10px] text-muted-text">
+                          Param templates — use <code>{"{{senderName}}"}</code>, <code>{"{{match}}"}</code>, <code>{"{{senderPhone}}"}</code>
+                        </p>
+                        {tpl.placeholders.map((p) => (
+                          <div key={p} className="flex items-center gap-2">
+                            <span className="w-6 shrink-0 text-right text-[10px] text-muted-text">{`{{${p}}}`}</span>
+                            <input
+                              type="text"
+                              className={inputCls}
+                              value={params[p] ?? ""}
+                              disabled={!s.enabled}
+                              placeholder={`Value for {{${p}}}`}
+                              onChange={(e) => {
+                                const newParams = { ...params, [p]: e.target.value };
+                                updateRowRouting(row.key, { templateParamsTemplate: newParams });
+                              }}
+                            />
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })()}
+                </>
+              )}
+            </div>
           </div>
-        ))}
+          );
+        })}
       </div>
 
       {/* Exclusions */}

@@ -7,10 +7,13 @@ import {
 } from "typeorm";
 
 @Entity({ name: "auto_reply_log" })
-@Index("idx_auto_reply_cp_sent", ["counterpartyJid", "sentAt"])
+@Index("idx_auto_reply_account_cp_sent", ["accountId", "counterpartyJid", "sentAt"])
 export class AutoReplyLog {
   @PrimaryGeneratedColumn()
   id!: number;
+
+  @Column("uuid", { name: "account_id" })
+  accountId!: string;
 
   @Column("varchar", { length: 512, name: "counterparty_jid" })
   counterpartyJid!: string;

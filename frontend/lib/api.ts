@@ -5,6 +5,7 @@
 export function apiBase(): string {
   const fromEnv = process.env.NEXT_PUBLIC_BACKEND_URL?.trim();
   if (fromEnv) return fromEnv.replace(/\/$/, "");
+  if (typeof window !== "undefined") return window.location.origin;
   return "http://localhost:4100";
 }
 

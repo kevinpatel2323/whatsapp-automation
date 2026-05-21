@@ -1,0 +1,10 @@
+name: prod
+type: Environment
+
+http:
+  public:
+    certificates:
+      - arn:aws:acm:ap-south-1:076812850349:certificate/14370315-3570-4a02-82fc-6d2ee875c5a1
+
+observability:
+  container_insights: false

@@ -14,6 +14,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { ConversationView } from "@/components/ConversationView";
+import { AccountSelector } from "@/components/AccountSelector";
 import { getJson, postJson } from "@/lib/api";
 import {
   classifiedBulkTargetFromItem,
@@ -292,6 +293,7 @@ export function ClassifiedBoard() {
   const [bulkMessage, setBulkMessage] = useState("");
   const [bulkSending, setBulkSending] = useState(false);
   const [bulkSummary, setBulkSummary] = useState<string | null>(null);
+  const [bulkAccountId, setBulkAccountId] = useState<string | null>(null);
 
   useLayoutEffect(() => {
     const stored = readPersistedFilters();
@@ -461,7 +463,9 @@ export function ClassifiedBoard() {
       const ordered = items.filter((item) => selectedKeys.has(classifiedRowKey(item)));
       const capped = ordered.slice(0, 25);
       const targets = capped.map(classifiedBulkTargetFromItem);
-      const resp = await postJson<BulkSendResponse>("/api/messages/send-bulk", { text, targets });
+      const payload: Record<string, unknown> = { text, targets };
+      if (bulkAccountId) payload.accountId = bulkAccountId;
+      const resp = await postJson<BulkSendResponse>("/api/messages/send-bulk", payload);
       setSelectedKeys((prev) => {
         const next = new Set(prev);
         capped.forEach((item, i) => {
@@ -688,6 +692,12 @@ export function ClassifiedBoard() {
 
             <div className="my-3 border-t border-white/10" aria-hidden />
 
+            <AccountSelector
+              selectedAccountId={bulkAccountId}
+              onSelect={setBulkAccountId}
+              hideIfSingle
+              className="mb-2"
+            />
             <textarea
               value={bulkMessage}
               onChange={(e) => setBulkMessage(e.target.value)}

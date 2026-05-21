@@ -14,6 +14,7 @@ function jidIsGroup(jid: string): boolean {
 
 function toPayload(row: ClassifiedMessage): ClassifiedMessagePayload {
   return {
+    accountId: row.accountId,
     messageId: row.messageId,
     remoteJid: row.remoteJid,
     fromMe: row.fromMe,
@@ -45,9 +46,6 @@ export function createClassificationService(opts: {
 }) {
   const { autoReply } = opts;
 
-  /**
-   * Upsert `classified_messages` for this message row (same transaction as Message upsert).
-   */
   async function upsertInTransaction(
     em: EntityManager,
     me: Message,
@@ -61,6 +59,7 @@ export function createClassificationService(opts: {
     const groupName = isGroup ? (chat?.name?.trim() || null) : null;
 
     const row: Partial<ClassifiedMessage> = {
+      accountId: me.accountId,
       messageId: me.id,
       remoteJid: me.remoteJid,
       fromMe: me.fromMe,
@@ -86,11 +85,16 @@ export function createClassificationService(opts: {
     };
 
     await em.getRepository(ClassifiedMessage).upsert(row as ClassifiedMessage, {
-      conflictPaths: ["messageId", "remoteJid", "fromMe"],
+      conflictPaths: ["accountId", "messageId", "remoteJid", "fromMe"],
     });
 
     const saved = await em.getRepository(ClassifiedMessage).findOne({
-      where: { messageId: me.id, remoteJid: me.remoteJid, fromMe: me.fromMe },
+      where: {
+        accountId: me.accountId,
+        messageId: me.id,
+        remoteJid: me.remoteJid,
+        fromMe: me.fromMe,
+      },
     });
     if (!saved) {
       throw new Error("classified_messages upsert failed");

@@ -1,4 +1,34 @@
+export type Account = {
+  id: string;
+  type: "baileys" | "waba";
+  displayName: string;
+  phoneE164: string | null;
+  status: "idle" | "connecting" | "open" | "close";
+  isActive: boolean;
+};
+
+export type MessageTemplate = {
+  id: string;
+  accountId: string;
+  name: string;
+  language: string;
+  category: string;
+  status: string;
+  placeholders: string[];
+  lastSyncedAt: string | null;
+};
+
+export type WabaDeliveryStatus = {
+  accountId: string;
+  providerMessageId: string;
+  recipientJid: string | null;
+  status: "accepted" | "sent" | "delivered" | "read" | "failed" | "deleted";
+  statusAt: string;
+  error?: { code: string | null; title: string | null; message: string | null } | null;
+};
+
 export type ClassifiedMessageDto = {
+  accountId?: string;
   messageId: string;
   remoteJid: string;
   fromMe: boolean;
@@ -48,6 +78,7 @@ export type ConnectionState =
   | string;
 
 export type MessageDto = {
+  accountId?: string;
   id: string;
   remoteJid: string;
   fromMe: boolean;
@@ -69,6 +100,15 @@ export type ReplyExclusionDto = {
   value: string;
 };
 
+export type MatchRoutingMode = "baileys-text" | "waba-text" | "waba-template";
+
+export type MatchRouting = {
+  accountId: string;
+  mode: MatchRoutingMode;
+  templateId?: string | null;
+  templateParamsTemplate?: Record<string, string> | null;
+};
+
 export type AutoReplySettingsDto = {
   enabled: boolean;
   buyEnabled: boolean;
@@ -82,6 +122,10 @@ export type AutoReplySettingsDto = {
   cooldownMinutes: number;
   /** People to never auto-reply (name + number/JID). */
   replyExclusions: ReplyExclusionDto[];
+  /** Per-match send routing. Absent = use Baileys default. */
+  replyRouting?: Record<string, MatchRouting>;
+  /** Default routing for matches without a specific entry. */
+  defaultRouting?: MatchRouting | null;
   updatedAt: string;
 };
 
@@ -95,6 +139,7 @@ export type AutoReplyLogEntry = {
 };
 
 export type ChatRow = {
+  accountId?: string;
   jid: string;
   name: string | null;
   isGroup: boolean;
@@ -109,16 +154,20 @@ export type ChatRow = {
 
 /** Socket events emitted by the backend (for documentation / typing handlers). */
 export type SocketEventMap = {
-  qr: { qr: string };
-  "connection:state": { state: string };
+  qr: { accountId?: string; qr: string };
+  "connection:state": { accountId?: string; state: string };
+  "account:updated": Account;
   "message:new": MessageDto;
   "message:classified": ClassifiedMessageDto;
   "chat:updated": ChatRow;
   "auto-reply:sent": {
+    accountId?: string;
     counterpartyJid?: string;
     sourceMessageId?: string | null;
     /** Conversation thread (DM or group) where the trigger message was received. */
     sourceRemoteJid?: string | null;
   };
   "settings:updated": AutoReplySettingsDto;
+  "waba:status": WabaDeliveryStatus;
+  "send:error": { accountId?: string; jid: string; error: string; requestId?: string };
 };
